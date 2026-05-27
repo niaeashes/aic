@@ -24,7 +24,7 @@ use futures_util::StreamExt;
 use serde_json::Value;
 
 use crate::llm::stream::StreamEvent;
-use crate::llm::types::{ChatRequest, FunctionCall, Message, Tool, ToolCall};
+use crate::llm::types::{ChatRequest, FunctionCall, Message, Role, Tool, ToolCall};
 use crate::llm::ChatClient;
 use crate::repl::context::ReplContext;
 
@@ -142,16 +142,12 @@ async fn stream_assistant(
         }
         for delta in payload.tool_calls {
             let entry = tool_calls.entry(delta.index).or_default();
-            // SPEC §6.1: id と name は先頭フラグメントにしか来ない
-            if let Some(id) = delta.id {
-                if entry.id.is_empty() {
-                    entry.id = id;
-                }
+            // SPEC §6.1: id と name は先頭フラグメントにしか来ない — None のときだけ上書き
+            if entry.id.is_none() {
+                entry.id = delta.id;
             }
-            if let Some(name) = delta.name {
-                if entry.name.is_empty() {
-                    entry.name = name;
-                }
+            if entry.name.is_none() {
+                entry.name = delta.name;
             }
             // arguments は分割されて届くので全断片を連結
             if let Some(frag) = delta.arguments_fragment {
@@ -164,20 +160,22 @@ async fn stream_assistant(
     }
 
     // 蓄積を ToolCall 列に変換（index 昇順は BTreeMap が保証）
+    // id / name が None のまま完了することは正常系ではあり得ないが、
+    // unwrap_or_default で空文字にとどめてパニックを避ける。
     let tool_calls_vec: Vec<ToolCall> = tool_calls
         .into_iter()
         .map(|(_, a)| ToolCall {
-            id: a.id,
+            id: a.id.unwrap_or_default(),
             kind: "function".to_string(),
             function: FunctionCall {
-                name: a.name,
+                name: a.name.unwrap_or_default(),
                 arguments: a.arguments,
             },
         })
         .collect();
 
     Ok(Message {
-        role: crate::llm::types::Role::Assistant,
+        role: Role::Assistant,
         content: if content.is_empty() { None } else { Some(content) },
         name: None,
         tool_calls: tool_calls_vec,
@@ -224,8 +222,9 @@ fn arg_preview(raw: &str) -> String {
 
 #[derive(Default)]
 struct ToolCallAccum {
-    id: String,
-    name: String,
+    /// SPEC §6.1: 先頭フラグメントにしか来ないので None = まだ受信していない。
+    id: Option<String>,
+    name: Option<String>,
     arguments: String,
 }
 

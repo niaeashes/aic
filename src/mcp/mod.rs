@@ -1,9 +1,10 @@
 // mcp — MCP 全サーバを束ねるマネージャと公開名カタログ（SPEC §7.4, §14-6）。
 //
-// 公開ツール名は **必ず** `"<server>__<tool>"` の合成キーで `HashMap` に保持し、
+// 公開ツール名は **必ず** `"<server>__<tool>"` の合成キーで `BTreeMap` に保持し、
 // LLM へは `as_openai_tools()` がこの合成キーをそのまま渡す。`tools/call` 時は
 // マップから (server_idx, 実ツール名) を引き直して投げる — 名前文字列をパースし直さ
-// ない（SPEC §7.4）。
+// ない（SPEC §7.4）。BTreeMap を使うことで挿入のたびにソート済みを保証し、
+// `as_openai_tools()` での再ソートが不要になる。
 //
 // 起動シーケンス（main.rs から呼ぶ）:
 //   1. `McpManager::connect_all(&settings, http)` で enabled な全サーバへ:
@@ -14,7 +15,7 @@
 pub mod protocol;
 pub mod transport;
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -37,7 +38,8 @@ pub struct McpServer {
 pub struct McpManager {
     pub servers: Vec<McpServer>,
     /// 公開名 `"<server>__<tool>"` → (server_idx, 実ツール名)。SPEC §7.4。
-    catalog: HashMap<String, (usize, String)>,
+    /// BTreeMap なのでキー順が常にソート済み — `as_openai_tools` で再ソート不要。
+    catalog: BTreeMap<String, (usize, String)>,
 }
 
 impl Default for McpManager {
@@ -52,7 +54,7 @@ impl McpManager {
     pub fn empty() -> Self {
         Self {
             servers: Vec::new(),
-            catalog: HashMap::new(),
+            catalog: BTreeMap::new(),
         }
     }
 
@@ -95,11 +97,8 @@ impl McpManager {
     /// `ChatRequest.tools` フィールド自体を省略できる（M7 で配線）。
     pub fn as_openai_tools(&self) -> Vec<Tool> {
         let mut out = Vec::with_capacity(self.catalog.len());
-        // 順序を安定化させて LLM 側キャッシュへの影響を減らす。
-        let mut keys: Vec<&String> = self.catalog.keys().collect();
-        keys.sort();
-        for public_name in keys {
-            let (idx, real_name) = &self.catalog[public_name];
+        // BTreeMap なのでキーは既にソート済み。LLM 側プロンプトキャッシュを安定させる。
+        for (public_name, (idx, real_name)) in &self.catalog {
             let def = self.servers[*idx]
                 .tools
                 .iter()
