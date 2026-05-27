@@ -101,11 +101,13 @@ async fn run_repl(config_path: Option<PathBuf>) -> Result<()> {
     // 接続失敗は per-server で握りつぶされるので、起動は止まらない（SPEC §14-6）。
     let mcp = mcp::McpManager::connect_all(&settings, http.clone()).await;
 
+    // secrets は expand_secrets で使い切り。以降は展開済みの settings だけ保持。
+    drop(secrets);
+
     let mut ctx = repl::context::ReplContext {
         settings,
         session: repl::context::Session::new(),
         http,
-        secrets,
         current_model,
         mcp,
     };

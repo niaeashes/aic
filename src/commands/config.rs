@@ -98,11 +98,15 @@ fn redact(settings: &Settings) -> Settings {
 // ---------------------------------------------------------------------------
 
 fn setup(ctx: &mut ReplContext) -> Result<Outcome> {
-    // 書き出し先は `--config <path>` 指定があればそれ、なければ既定ホーム。
-    // ReplContext には CLI で受けたパスが保存されていないので、`home_config_path(None)`
-    // を再評価する（環境変数 AIC_CONFIG_DIR / HOME の現値で）。
-    let target = home_config_path(None)
-        .context("ホーム config パスの解決に失敗")?;
+    // 書き出し先は ctx.settings.config_dir（main.rs でロード済み）配下の config.yaml。
+    // `--config <path>` 指定時も config_dir はそのパスの親ディレクトリになっているため、
+    // ここで再評価する必要はない。home_config_path(None) を使うと --config 指定が無視される。
+    let target = if ctx.settings.config_dir.as_os_str().is_empty() {
+        // config_dir が空（デフォルト値のまま）の場合のみフォールバックとして再解決する
+        home_config_path(None).context("ホーム config パスの解決に失敗")?
+    } else {
+        ctx.settings.config_dir.join("config.yaml")
+    };
 
     let stdin = std::io::stdin();
     let mut stdin = stdin.lock();
