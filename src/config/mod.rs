@@ -59,8 +59,6 @@ fn default_enabled() -> bool {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UiConfig {
-    #[serde(default = "default_stream")]
-    pub stream: bool,
     #[serde(default = "default_history_size")]
     pub history_size: usize,
     #[serde(default = "default_max_tool_iter")]
@@ -70,16 +68,12 @@ pub struct UiConfig {
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
-            stream: default_stream(),
             history_size: default_history_size(),
             max_tool_iterations: default_max_tool_iter(),
         }
     }
 }
 
-fn default_stream() -> bool {
-    true
-}
 fn default_history_size() -> usize {
     1000
 }
@@ -333,15 +327,15 @@ mod tests {
             r#"
             default_model: a:x
             ui:
-              stream: true
               history_size: 100
+              max_tool_iterations: 5
             "#,
         )
         .unwrap();
         let overlay: serde_yml::Value = serde_yml::from_str(
             r#"
             ui:
-              stream: false
+              max_tool_iterations: 20
             "#,
         )
         .unwrap();
@@ -349,7 +343,7 @@ mod tests {
         // ui は丸ごと置き換え。history_size は overlay に無いので消える。
         let merged_str = serde_yml::to_string(&merged).unwrap();
         assert!(merged_str.contains("default_model"));
-        assert!(merged_str.contains("stream: false"));
+        assert!(merged_str.contains("max_tool_iterations: 20"));
         assert!(!merged_str.contains("history_size"));
     }
 

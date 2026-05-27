@@ -201,7 +201,6 @@ fn build_settings(
         model_groups: groups,
         mcp_servers: servers,
         ui: crate::config::UiConfig {
-            stream: true,
             history_size,
             max_tool_iterations: max_iter,
         },
@@ -539,6 +538,7 @@ mod tests {
         }];
         let default_model = crate::config::ModelRef { group: "g".into(), model: "m".into() };
         let s = build_settings(groups, default_model, vec![], 10, 1000);
-        assert!(s.ui.stream);
+        assert_eq!(s.ui.max_tool_iterations, 10);
+        assert_eq!(s.ui.history_size, 1000);
     }
 }
