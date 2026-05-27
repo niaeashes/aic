@@ -24,7 +24,7 @@ use futures_util::StreamExt;
 use serde_json::Value;
 
 use crate::llm::stream::StreamEvent;
-use crate::llm::types::{ChatRequest, FunctionCall, Message, Role, Tool, ToolCall};
+use crate::llm::types::{ChatRequest, FunctionCall, Message, Tool, ToolCall};
 use crate::llm::ChatClient;
 use crate::repl::context::ReplContext;
 
@@ -61,7 +61,7 @@ pub async fn run_turn(ctx: &mut ReplContext, user_input: String) -> Result<()> {
         let assistant =
             stream_assistant(&client, &ep.url, ep.api_key.as_deref(), &ep.headers, &request)
                 .await?;
-        let tool_calls = assistant.tool_calls.clone();
+        let tool_calls = assistant.tool_calls().to_vec();
         ctx.session.messages.push(assistant);
 
         // tool_calls が空 → 通常応答完了
@@ -174,12 +174,9 @@ async fn stream_assistant(
         })
         .collect();
 
-    Ok(Message {
-        role: Role::Assistant,
+    Ok(Message::Assistant {
         content: if content.is_empty() { None } else { Some(content) },
-        name: None,
         tool_calls: tool_calls_vec,
-        tool_call_id: None,
     })
 }
 
