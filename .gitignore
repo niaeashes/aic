@@ -1,0 +1,10 @@
+/target
+/Cargo.lock
+
+# シークレット（平文は絶対にコミットしない。env.json.enc のみコミット可）
+env.json
+
+# エディタ
+*.swp
+*.swo
+.DS_Store

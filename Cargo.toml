@@ -1,0 +1,49 @@
+[package]
+name = "aic"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "aic"
+path = "src/main.rs"
+
+[dependencies]
+# 非同期ランタイム
+tokio = { version = "1", features = ["full"] }
+
+# HTTP
+reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls"] }
+eventsource-stream = "0.2"
+
+# シリアライズ
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yml = "0.0.12"
+
+# CLI / REPL
+clap = { version = "4", features = ["derive"] }
+rustyline = "14"
+
+# エラー
+anyhow = "1"
+
+# コマンド登録
+async-trait = "0.1"
+inventory = "0.3"
+
+# シークレット
+chacha20poly1305 = "0.10"
+# keyring 3.x はバックエンドを feature で明示する必要がある。MVP は macOS Keychain のみ。
+keyring = { version = "3", features = ["apple-native"] }
+base64 = "0.22"
+rand = "0.8"
+
+# パス解決
+directories = "5"
+
+# ロギング
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Stream ユーティリティ（reqwest の bytes_stream を扱うため）
+futures-util = "0.3"
