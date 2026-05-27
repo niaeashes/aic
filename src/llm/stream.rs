@@ -14,11 +14,13 @@ use eventsource_stream::Eventsource;
 use futures_util::{Stream, StreamExt};
 use serde::Deserialize;
 
-/// SSE 1 件分のチャンク。`Done` は `data: [DONE]` 受信時。
+/// SSE 1 件分のチャンク。
+///
+/// `[DONE]` 受信時はストリームを即終了（`None`）するため、`Done` バリアントは持たない。
+/// 呼び出し側は Stream の自然終了（`next()` が `None` を返す）でループを終わらせる。
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     Chunk(ChunkPayload),
-    Done,
 }
 
 /// 1 チャンクから取り出した有意なデルタ。空チャンクは `parse_stream` 内でスキップ。
@@ -44,8 +46,8 @@ pub struct ToolCallDelta {
 
 /// `reqwest::Response` を消費し、SSE をパースして `StreamEvent` を流す。
 ///
-/// `Done` を yield した後にさらに `next()` が呼ばれた場合、内部でストリームを使い切るまで
-/// 空読みするだけで、何も yield しない。呼び出し側は `Done` で break すべき。
+/// `[DONE]` 受信時は即座に `None` を返してストリームを終了する。`es` が drop されるため
+/// HTTP 接続も同時に解放される。呼び出し側は `while let Some(...)` でループするだけでよい。
 pub fn parse_stream(resp: reqwest::Response) -> impl Stream<Item = Result<StreamEvent>> {
     let es = resp.bytes_stream().eventsource();
     futures_util::stream::unfold(Some(es), |state| async move {
@@ -59,7 +61,8 @@ pub fn parse_stream(resp: reqwest::Response) -> impl Stream<Item = Result<Stream
                 Some(Ok(event)) => {
                     // SSE の event-type 行は使わない（OpenAI 互換は `data:` のみ送る）。
                     if event.data == "[DONE]" {
-                        return Some((Ok(StreamEvent::Done), Some(es)));
+                        // es を drop → HTTP 接続を解放。Stream を自然終了させる。
+                        return None;
                     }
                     if event.data.is_empty() {
                         continue;

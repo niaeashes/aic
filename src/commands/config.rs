@@ -102,7 +102,6 @@ fn setup(ctx: &mut ReplContext) -> Result<Outcome> {
     // `--config <path>` 指定時も config_dir はそのパスの親ディレクトリになっているため、
     // ここで再評価する必要はない。home_config_path(None) を使うと --config 指定が無視される。
     let target = if ctx.settings.config_dir.as_os_str().is_empty() {
-        // config_dir が空（デフォルト値のまま）の場合のみフォールバックとして再解決する
         home_config_path(None).context("ホーム config パスの解決に失敗")?
     } else {
         ctx.settings.config_dir.join("config.yaml")
@@ -115,57 +114,13 @@ fn setup(ctx: &mut ReplContext) -> Result<Outcome> {
     println!("書き出し先: {}", target.display());
 
     if target.exists() {
-        let overwrite = prompt_bool(&mut stdin, "既存ファイルがあります。上書きしますか？", false)?;
-        if !overwrite {
+        if !prompt_bool(&mut stdin, "既存ファイルがあります。上書きしますか？", false)? {
             println!("setup を中断しました。");
             return Ok(Outcome::Continue);
         }
     }
 
-    // モデルグループは最低 1 個必須
-    let mut groups: Vec<ModelGroup> = Vec::new();
-    loop {
-        println!("\n[model group #{}]", groups.len() + 1);
-        let group = read_model_group(&mut stdin)?;
-        groups.push(group);
-        if !prompt_bool(&mut stdin, "もう 1 つ model group を追加しますか？", false)? {
-            break;
-        }
-    }
-
-    // default_model（一覧から番号で選ばせる）
-    let default_model = pick_default_model(&mut stdin, &groups)?;
-
-    // MCP サーバは任意
-    let mut servers: Vec<McpServerCfg> = Vec::new();
-    if prompt_bool(&mut stdin, "\nMCP サーバを設定しますか？", false)? {
-        loop {
-            println!("\n[mcp server #{}]", servers.len() + 1);
-            let srv = read_mcp_server(&mut stdin)?;
-            servers.push(srv);
-            if !prompt_bool(&mut stdin, "もう 1 つ MCP サーバを追加しますか？", false)? {
-                break;
-            }
-        }
-    }
-
-    let max_iter = prompt_u32(
-        &mut stdin,
-        "\nui.max_tool_iterations",
-        ctx.settings.ui.max_tool_iterations,
-    )?;
-
-    let new_settings = Settings {
-        default_model: Some(default_model),
-        model_groups: groups,
-        mcp_servers: servers,
-        ui: crate::config::UiConfig {
-            stream: true,
-            history_size: ctx.settings.ui.history_size,
-            max_tool_iterations: max_iter,
-        },
-        config_dir: PathBuf::new(),
-    };
+    let new_settings = run_setup(&mut stdin, &ctx.settings)?;
 
     // プレビュー（redact 済み）
     println!("\n=== 生成される config.yaml（秘匿値はマスク表示）===");
@@ -192,6 +147,66 @@ fn setup(ctx: &mut ReplContext) -> Result<Outcome> {
     );
 
     Ok(Outcome::Continue)
+}
+
+/// 対話的に設定を収集して `Settings` を返す。IO は `r` 経由なので `Cursor` を渡してテスト可能。
+fn run_setup<R: BufRead>(r: &mut R, current: &Settings) -> Result<Settings> {
+    // モデルグループは最低 1 個必須
+    let mut groups: Vec<ModelGroup> = Vec::new();
+    loop {
+        println!("\n[model group #{}]", groups.len() + 1);
+        let group = read_model_group(r)?;
+        groups.push(group);
+        if !prompt_bool(r, "もう 1 つ model group を追加しますか？", false)? {
+            break;
+        }
+    }
+
+    let default_model = pick_default_model(r, &groups)?;
+
+    // MCP サーバは任意
+    let mut servers: Vec<McpServerCfg> = Vec::new();
+    if prompt_bool(r, "\nMCP サーバを設定しますか？", false)? {
+        loop {
+            println!("\n[mcp server #{}]", servers.len() + 1);
+            let srv = read_mcp_server(r)?;
+            servers.push(srv);
+            if !prompt_bool(r, "もう 1 つ MCP サーバを追加しますか？", false)? {
+                break;
+            }
+        }
+    }
+
+    let max_iter = prompt_u32(r, "\nui.max_tool_iterations", current.ui.max_tool_iterations)?;
+
+    Ok(build_settings(
+        groups,
+        default_model,
+        servers,
+        max_iter,
+        current.ui.history_size,
+    ))
+}
+
+/// 収集済みの値から `Settings` を組み立てる。IO なし。
+fn build_settings(
+    groups: Vec<ModelGroup>,
+    default_model: ModelRef,
+    servers: Vec<McpServerCfg>,
+    max_iter: u32,
+    history_size: usize,
+) -> Settings {
+    Settings {
+        default_model: Some(default_model),
+        model_groups: groups,
+        mcp_servers: servers,
+        ui: crate::config::UiConfig {
+            stream: true,
+            history_size,
+            max_tool_iterations: max_iter,
+        },
+        config_dir: PathBuf::new(),
+    }
 }
 
 fn read_model_group<R: BufRead>(r: &mut R) -> Result<ModelGroup> {
@@ -472,5 +487,58 @@ mod tests {
         assert_eq!(prompt_u32(&mut cur, "n", 7).unwrap(), 7);
         let mut cur = Cursor::new(b"42\n".as_slice());
         assert_eq!(prompt_u32(&mut cur, "n", 7).unwrap(), 42);
+    }
+
+    #[test]
+    fn run_setup_basic_no_mcp() {
+        // group 名 / base_url / api_key / models の 4 行 → デフォルト選択 (1) →
+        // group 追加なし (n) → MCP なし (n) → max_iter デフォルト
+        let input = concat!(
+            "openai\n",                    // group 名
+            "https://api.openai.com/v1\n", // base_url
+            "${OPENAI_API_KEY}\n",          // api_key
+            "gpt-4o-mini\n",               // models
+            "n\n",                         // group 追加？ → No
+            "1\n",                         // default_model 番号
+            "n\n",                         // MCP サーバ設定？ → No
+            "\n",                          // max_tool_iterations デフォルト
+        );
+        let current = Settings::default();
+        let mut cur = Cursor::new(input.as_bytes());
+        let s = run_setup(&mut cur, &current).unwrap();
+        assert_eq!(s.model_groups.len(), 1);
+        assert_eq!(s.model_groups[0].name, "openai");
+        assert_eq!(s.default_model.as_ref().unwrap().group, "openai");
+        assert!(s.mcp_servers.is_empty());
+        assert_eq!(s.ui.max_tool_iterations, 10); // UiConfig::default
+    }
+
+    #[test]
+    fn build_settings_carries_history_size() {
+        let groups = vec![ModelGroup {
+            name: "g".into(),
+            base_url: "http://x".into(),
+            api_key: None,
+            headers: BTreeMap::new(),
+            models: vec!["m".into()],
+        }];
+        let default_model = crate::config::ModelRef { group: "g".into(), model: "m".into() };
+        let s = build_settings(groups, default_model, vec![], 5, 500);
+        assert_eq!(s.ui.history_size, 500);
+        assert_eq!(s.ui.max_tool_iterations, 5);
+    }
+
+    #[test]
+    fn build_settings_stream_always_true() {
+        let groups = vec![ModelGroup {
+            name: "g".into(),
+            base_url: "http://x".into(),
+            api_key: None,
+            headers: BTreeMap::new(),
+            models: vec!["m".into()],
+        }];
+        let default_model = crate::config::ModelRef { group: "g".into(), model: "m".into() };
+        let s = build_settings(groups, default_model, vec![], 10, 1000);
+        assert!(s.ui.stream);
     }
 }

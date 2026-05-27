@@ -123,6 +123,19 @@ impl std::fmt::Display for ModelRef {
 }
 
 // ---------------------------------------------------------------------------
+// エンドポイント解決（agent が config の内部構造を知らなくてよくなる）
+// ---------------------------------------------------------------------------
+
+/// agent が LLM を叩くのに必要な接続情報。config レイヤーで組み立てて返す。
+#[derive(Debug, Clone)]
+pub struct ResolvedEndpoint {
+    /// `/chat/completions` を付加済みの完全 URL。
+    pub url: String,
+    pub api_key: Option<String>,
+    pub headers: BTreeMap<String, String>,
+}
+
+// ---------------------------------------------------------------------------
 // Settings 検索ヘルパ（M4 — `/model use` の存在検証で使う）
 // ---------------------------------------------------------------------------
 
@@ -138,6 +151,21 @@ impl Settings {
         self.group_by_name(group)
             .map(|g| g.models.iter().any(|m| m == model))
             .unwrap_or(false)
+    }
+
+    /// `model_ref` に対応するエンドポイント情報を解決して返す。
+    ///
+    /// 呼び出し側（agent）は config の内部構造（`ModelGroup` のフィールド名等）を
+    /// 知る必要がなくなり、受け取った `ResolvedEndpoint` を使って叩くだけになる。
+    pub fn resolve_for_model(&self, model_ref: &ModelRef) -> Result<ResolvedEndpoint> {
+        let group = self
+            .group_by_name(&model_ref.group)
+            .with_context(|| format!("model group '{}' が config に存在しません", model_ref.group))?;
+        Ok(ResolvedEndpoint {
+            url: format!("{}/chat/completions", group.base_url.trim_end_matches('/')),
+            api_key: group.api_key.clone(),
+            headers: group.headers.clone(),
+        })
     }
 
     /// config 内の `${VAR}` を全フィールドに対して展開する（M5, SPEC §5）。
@@ -367,6 +395,44 @@ mod tests {
         assert_eq!(s.model_groups[0].api_key.as_deref(), Some("Bearer sk-xyz"));
         assert_eq!(s.model_groups[0].headers["X"], "sk-xyz-suffix");
         assert_eq!(s.mcp_servers[0].headers["Authorization"], "Bearer tskey-aaa");
+    }
+
+    #[test]
+    fn resolve_for_model_builds_correct_url() {
+        let mut s = Settings::default();
+        s.model_groups.push(ModelGroup {
+            name: "openai".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            api_key: Some("sk-xxx".into()),
+            headers: BTreeMap::new(),
+            models: vec!["gpt-4o-mini".into()],
+        });
+        let r = ModelRef::parse("openai:gpt-4o-mini").unwrap();
+        let ep = s.resolve_for_model(&r).unwrap();
+        assert_eq!(ep.url, "https://api.openai.com/v1/chat/completions");
+        assert_eq!(ep.api_key.as_deref(), Some("sk-xxx"));
+    }
+
+    #[test]
+    fn resolve_for_model_strips_trailing_slash() {
+        let mut s = Settings::default();
+        s.model_groups.push(ModelGroup {
+            name: "g".into(),
+            base_url: "http://localhost:11434/v1/".into(),
+            api_key: None,
+            headers: BTreeMap::new(),
+            models: vec!["llama3".into()],
+        });
+        let r = ModelRef::parse("g:llama3").unwrap();
+        let ep = s.resolve_for_model(&r).unwrap();
+        assert_eq!(ep.url, "http://localhost:11434/v1/chat/completions");
+    }
+
+    #[test]
+    fn resolve_for_model_unknown_group_errors() {
+        let s = Settings::default();
+        let r = ModelRef::parse("nonexistent:model").unwrap();
+        assert!(s.resolve_for_model(&r).is_err());
     }
 
     #[test]

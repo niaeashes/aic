@@ -1,10 +1,10 @@
 // agent — 1 ターン分の chat ループ（SPEC §8）。
 //
-// M7 で「tool 呼べるチャット」になる。ループ構造（SPEC §8 ステップ 1–3）:
+// ループ構造（SPEC §8 ステップ 1–3）:
 //
 //   1. user メッセージを session に push（ターン頭、1 回だけ）
 //   2. ループ反復 i = 0..max_tool_iterations:
-//      a. current_model のグループから base_url/api_key/headers を引いて ChatRequest 構築
+//      a. Settings::resolve_for_model でエンドポイント情報を取得
 //         - tools には ctx.mcp.as_openai_tools() を渡す（空なら None でフィールド省略）
 //      b. SSE ストリームを回し、content と tool_calls を蓄積
 //      c. 蓄積を assistant メッセージとして push
@@ -15,11 +15,6 @@
 //           （モデルに失敗を伝えることで自己回復できるようにする）
 //   3. max_tool_iterations に達しても tool_calls が空にならなければ警告を出して打ち切り
 //      （aichat 系で見られた「壊れたツールでループ消費して制御戻らない」の回避）
-//
-// M8: 表示整形。assistant ラベル、tool 開始/終了のインジケータを統一する。
-//   - assistant 本文が空でストレートに tool_call へ進むケースでも「思考だけで応答無し」
-//     と区別が付くようインジケータを必ず出す。
-//   - tool 引数は短くプレビュー表示（長すぎる JSON はターミナルを汚す）。
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -29,7 +24,7 @@ use futures_util::StreamExt;
 use serde_json::Value;
 
 use crate::llm::stream::StreamEvent;
-use crate::llm::types::{ChatRequest, FunctionCall, Message, Role, Tool, ToolCall};
+use crate::llm::types::{ChatRequest, FunctionCall, Message, Tool, ToolCall};
 use crate::llm::ChatClient;
 use crate::repl::context::ReplContext;
 
@@ -39,29 +34,16 @@ const TOOL_ARG_PREVIEW_MAX: usize = 80;
 pub async fn run_turn(ctx: &mut ReplContext, user_input: String) -> Result<()> {
     ctx.session.messages.push(Message::user(user_input));
 
-    // モデル / グループ解決（ターンを通して固定）。
+    // エンドポイント解決は Settings に委譲。agent は config の内部構造を知らない。
     let model_ref = ctx.current_model.clone().context(
         "モデルが未選択です。config の default_model か、/model use <group>:<model> で選択してください",
     )?;
-    let group = ctx
-        .settings
-        .group_by_name(&model_ref.group)
-        .with_context(|| format!("model group '{}' が config に存在しません", model_ref.group))?;
-
-    // `${VAR}` 展開は起動時に `Settings::expand_secrets` で済んでいる（M5）。
-    let api_key = group.api_key.clone();
-    let headers: BTreeMap<String, String> = group.headers.clone();
-    let endpoint = format!(
-        "{}/chat/completions",
-        group.base_url.trim_end_matches('/')
-    );
-
+    let ep = ctx.settings.resolve_for_model(&model_ref)?;
     let max_iter = ctx.settings.ui.max_tool_iterations;
     let client = ChatClient::new(ctx.http.clone());
 
     for _iter in 0..max_iter {
-        // MCP ツールは毎反復で最新化（disabled トグル等は M7 段階では起動時固定だが、
-        // 「空配列なら tools フィールドごと省く」だけここで担保しておく）。
+        // MCP ツールは毎反復で最新化（空配列なら tools フィールドごと省く）。
         let tool_list = ctx.mcp.as_openai_tools();
         let tools: Option<Vec<Tool>> = if tool_list.is_empty() {
             None
@@ -76,8 +58,9 @@ pub async fn run_turn(ctx: &mut ReplContext, user_input: String) -> Result<()> {
             stream: true,
         };
 
-        let assistant = stream_assistant(&client, &endpoint, api_key.as_deref(), &headers, &request)
-            .await?;
+        let assistant =
+            stream_assistant(&client, &ep.url, ep.api_key.as_deref(), &ep.headers, &request)
+                .await?;
         let tool_calls = assistant.tool_calls.clone();
         ctx.session.messages.push(assistant);
 
@@ -114,13 +97,7 @@ pub async fn run_turn(ctx: &mut ReplContext, user_input: String) -> Result<()> {
                 }
             };
 
-            ctx.session.messages.push(Message {
-                role: Role::Tool,
-                content: Some(content),
-                name: Some(public_name),
-                tool_calls: Vec::new(),
-                tool_call_id: Some(tc.id.clone()),
-            });
+            ctx.session.messages.push(Message::tool(tc.id, public_name, content));
         }
     }
 
@@ -152,39 +129,34 @@ async fn stream_assistant(
     let mut printed_anything = false;
 
     while let Some(event) = stream.next().await {
-        match event? {
-            StreamEvent::Chunk(payload) => {
-                if let Some(c) = payload.content {
-                    if !printed_anything {
-                        // 先頭で 1 度だけ assistant ラベルを出す
-                        print!("{ASSISTANT_LABEL}");
-                    }
-                    print!("{c}");
-                    // flush しないと長い応答が後ろにまとめて出てしまう
-                    std::io::stdout().flush().ok();
-                    content.push_str(&c);
-                    printed_anything = true;
-                }
-                for delta in payload.tool_calls {
-                    let entry = tool_calls.entry(delta.index).or_default();
-                    // SPEC §6.1: id と name は先頭フラグメントにしか来ない
-                    if let Some(id) = delta.id {
-                        if entry.id.is_empty() {
-                            entry.id = id;
-                        }
-                    }
-                    if let Some(name) = delta.name {
-                        if entry.name.is_empty() {
-                            entry.name = name;
-                        }
-                    }
-                    // arguments は分割されて届くので全断片を連結
-                    if let Some(frag) = delta.arguments_fragment {
-                        entry.arguments.push_str(&frag);
-                    }
+        // [DONE] はストリーム側で None に変換済みなのでここには届かない
+        let StreamEvent::Chunk(payload) = event?;
+        if let Some(c) = payload.content {
+            if !printed_anything {
+                print!("{ASSISTANT_LABEL}");
+            }
+            print!("{c}");
+            std::io::stdout().flush().ok();
+            content.push_str(&c);
+            printed_anything = true;
+        }
+        for delta in payload.tool_calls {
+            let entry = tool_calls.entry(delta.index).or_default();
+            // SPEC §6.1: id と name は先頭フラグメントにしか来ない
+            if let Some(id) = delta.id {
+                if entry.id.is_empty() {
+                    entry.id = id;
                 }
             }
-            StreamEvent::Done => break,
+            if let Some(name) = delta.name {
+                if entry.name.is_empty() {
+                    entry.name = name;
+                }
+            }
+            // arguments は分割されて届くので全断片を連結
+            if let Some(frag) = delta.arguments_fragment {
+                entry.arguments.push_str(&frag);
+            }
         }
     }
     if printed_anything {
@@ -205,7 +177,7 @@ async fn stream_assistant(
         .collect();
 
     Ok(Message {
-        role: Role::Assistant,
+        role: crate::llm::types::Role::Assistant,
         content: if content.is_empty() { None } else { Some(content) },
         name: None,
         tool_calls: tool_calls_vec,
@@ -227,10 +199,6 @@ fn parse_tool_arguments(raw: &str) -> Result<Value> {
 }
 
 /// ツール呼び出しの可視化用に引数を 1 行プレビュー化。
-///
-/// - 改行は `\n` のエスケープに置換
-/// - `TOOL_ARG_PREVIEW_MAX` を超えたら末尾を `…` で省略
-/// - 空 / 空白のみは `""` を返してカッコの中身ゼロを明示
 fn arg_preview(raw: &str) -> String {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -300,7 +268,6 @@ mod tests {
         let long: String = "a".repeat(200);
         let p = arg_preview(&long);
         assert!(p.ends_with('…'));
-        // 切り詰め後の文字数 = TOOL_ARG_PREVIEW_MAX + 1（'…' ぶん）
         assert_eq!(p.chars().count(), TOOL_ARG_PREVIEW_MAX + 1);
     }
 

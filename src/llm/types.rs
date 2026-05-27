@@ -44,6 +44,19 @@ impl Message {
     pub fn assistant_text(content: impl Into<String>) -> Self {
         Self::new(Role::Assistant, Some(content.into()))
     }
+    pub fn tool(
+        tool_call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
+        Self {
+            role: Role::Tool,
+            content: Some(content.into()),
+            name: Some(tool_name.into()),
+            tool_calls: Vec::new(),
+            tool_call_id: Some(tool_call_id.into()),
+        }
+    }
     fn new(role: Role, content: Option<String>) -> Self {
         Self {
             role,
@@ -157,5 +170,27 @@ mod tests {
     fn role_deserializes_case_insensitive_via_lowercase() {
         let r: Role = serde_json::from_str(r#""tool""#).unwrap();
         assert_eq!(r, Role::Tool);
+    }
+
+    #[test]
+    fn tool_message_has_required_fields() {
+        let m = Message::tool("call_42", "my_tool", "result text");
+        assert_eq!(m.role, Role::Tool);
+        assert_eq!(m.tool_call_id.as_deref(), Some("call_42"));
+        assert_eq!(m.name.as_deref(), Some("my_tool"));
+        assert_eq!(m.content.as_deref(), Some("result text"));
+        assert!(m.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn tool_message_serializes_correctly() {
+        let m = Message::tool("cid", "fn_name", "ok");
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(v["role"], "tool");
+        assert_eq!(v["tool_call_id"], "cid");
+        assert_eq!(v["name"], "fn_name");
+        assert_eq!(v["content"], "ok");
+        // tool_calls は空なのでペイロードに出ない
+        assert!(v.get("tool_calls").is_none());
     }
 }
