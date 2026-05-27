@@ -34,11 +34,14 @@ const TOOL_ARG_PREVIEW_MAX: usize = 80;
 pub async fn run_turn(ctx: &mut ReplContext, user_input: String) -> Result<()> {
     ctx.session.messages.push(Message::user(user_input));
 
-    // エンドポイント解決は Settings に委譲。agent は config の内部構造を知らない。
-    let model_ref = ctx.current_model.clone().context(
+    // ActiveModel はモデル選択時に 1 度だけ解決済み。agent は Settings を知らなくていい。
+    let active = ctx.current_model.as_ref().context(
         "モデルが未選択です。config の default_model か、/model use <group>:<model> で選択してください",
     )?;
-    let ep = ctx.settings.resolve_for_model(&model_ref)?;
+    let model_name = active.model.clone();
+    let endpoint_url = active.endpoint_url.clone();
+    let api_key = active.api_key.clone();
+    let headers = active.headers.clone();
     let max_iter = ctx.settings.ui.max_tool_iterations;
     let client = ChatClient::new(ctx.http.clone());
 
@@ -52,14 +55,14 @@ pub async fn run_turn(ctx: &mut ReplContext, user_input: String) -> Result<()> {
         };
 
         let request = ChatRequest {
-            model: model_ref.model.clone(),
+            model: model_name.clone(),
             messages: ctx.session.messages.clone(),
             tools,
             stream: true,
         };
 
         let assistant =
-            stream_assistant(&client, &ep.url, ep.api_key.as_deref(), &ep.headers, &request)
+            stream_assistant(&client, &endpoint_url, api_key.as_deref(), &headers, &request)
                 .await?;
         let tool_calls = assistant.tool_calls().to_vec();
         ctx.session.messages.push(assistant);

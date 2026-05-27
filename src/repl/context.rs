@@ -6,7 +6,7 @@
 // `Secrets` は main.rs で `expand_secrets` を呼び出した後は不要になるため、
 // `ReplContext` には含めない。展開済みの Settings だけを保持する。
 
-use crate::config::{ModelRef, Settings};
+use crate::config::{ActiveModel, Settings};
 use crate::llm::types::Message;
 use crate::mcp::McpManager;
 
@@ -31,9 +31,10 @@ pub struct ReplContext {
     pub settings: Settings,
     pub session: Session,
     pub http: reqwest::Client,
-    /// 現在使用中のモデル。config に `default_model` が無ければ None で起動し、
-    /// `/model use` で確定する想定（M4）。`agent::run_turn` が None だとエラーで弾く。
-    pub current_model: Option<ModelRef>,
+    /// 現在使用中のモデル。`/model use` 時に `Settings::activate_model` で解決して
+    /// キャッシュする。config に `default_model` が無ければ None で起動。
+    /// `agent::run_turn` が None だとエラーで弾く（ターンごとの再解決は不要）。
+    pub current_model: Option<ActiveModel>,
     /// MCP サーバ群 + 公開ツールカタログ（M6）。
     /// 起動時の接続失敗は per-server で握りつぶし、空でも REPL は回る。
     pub mcp: McpManager,

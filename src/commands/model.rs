@@ -13,7 +13,7 @@ use anyhow::{bail, Result};
 use async_trait::async_trait;
 
 use super::{Command, Outcome};
-use crate::config::ModelRef;
+use crate::config::ModelRef;  // ユーザー入力のパースに引き続き必要
 use crate::repl::context::ReplContext;
 
 struct Model;
@@ -50,7 +50,7 @@ impl Command for Model {
 }
 
 fn print_list(ctx: &ReplContext) {
-    let current = ctx.current_model.as_ref();
+    let current_label = ctx.current_model.as_ref().map(|a| a.label());
     if ctx.settings.model_groups.is_empty() {
         println!("（model_groups が未設定）");
         return;
@@ -61,11 +61,9 @@ fn print_list(ctx: &ReplContext) {
             continue;
         }
         for model in &group.models {
-            let is_current = current
-                .map(|c| c.group == group.name && c.model == *model)
-                .unwrap_or(false);
-            let mark = if is_current { "*" } else { " " };
-            println!("{mark} {}:{}", group.name, model);
+            let label = format!("{}:{}", group.name, model);
+            let mark = if current_label.as_deref() == Some(&label) { "*" } else { " " };
+            println!("{mark} {label}");
         }
     }
 }
@@ -89,8 +87,10 @@ fn use_model(arg: &str, ctx: &mut ReplContext) -> Result<Outcome> {
             model_ref.group
         );
     }
-    println!("モデルを切り替えました: {model_ref}");
-    ctx.current_model = Some(model_ref);
+    // Settings から ActiveModel を解決してキャッシュ。以降の agent はこれを直接使う。
+    let active = ctx.settings.activate_model(&model_ref)?;
+    println!("モデルを切り替えました: {}", active.label());
+    ctx.current_model = Some(active);
     Ok(Outcome::Continue)
 }
 

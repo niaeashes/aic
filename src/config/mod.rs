@@ -117,16 +117,30 @@ impl std::fmt::Display for ModelRef {
 }
 
 // ---------------------------------------------------------------------------
-// エンドポイント解決（agent が config の内部構造を知らなくてよくなる）
+// ActiveModel — モデル選択時に 1 度だけ解決される「使用中モデル」の完全な状態
 // ---------------------------------------------------------------------------
 
-/// agent が LLM を叩くのに必要な接続情報。config レイヤーで組み立てて返す。
+/// `/model use` 時に Settings から解決し、`ReplContext` にキャッシュする型。
+///
+/// agent / コマンド群はこの型だけ見れば LLM を呼べる。Settings の内部構造に依存しない。
+/// ターンごとに再解決しないことで、Settings への後付き依存が生まれない設計にしている。
 #[derive(Debug, Clone)]
-pub struct ResolvedEndpoint {
+pub struct ActiveModel {
+    /// config 上のグループ名（例: `"openai"`）。`/model` 一覧で `*` を付ける基準に使う。
+    pub group: String,
+    /// ChatRequest の `model` フィールドに入る文字列（例: `"gpt-4o-mini"`）。
+    pub model: String,
     /// `/chat/completions` を付加済みの完全 URL。
-    pub url: String,
+    pub endpoint_url: String,
     pub api_key: Option<String>,
     pub headers: BTreeMap<String, String>,
+}
+
+impl ActiveModel {
+    /// `/model` 一覧・ログ用の `<group>:<model>` 表示文字列。
+    pub fn label(&self) -> String {
+        format!("{}:{}", self.group, self.model)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -147,16 +161,18 @@ impl Settings {
             .unwrap_or(false)
     }
 
-    /// `model_ref` に対応するエンドポイント情報を解決して返す。
+    /// `model_ref` を `ActiveModel` に解決する。`/model use` 時に 1 度だけ呼ぶ。
     ///
-    /// 呼び出し側（agent）は config の内部構造（`ModelGroup` のフィールド名等）を
-    /// 知る必要がなくなり、受け取った `ResolvedEndpoint` を使って叩くだけになる。
-    pub fn resolve_for_model(&self, model_ref: &ModelRef) -> Result<ResolvedEndpoint> {
+    /// 解決後は `ReplContext.current_model` にキャッシュされ、agent はそこから
+    /// 直接読む。ターンごとに Settings を問い合わせ直す必要がない。
+    pub fn activate_model(&self, model_ref: &ModelRef) -> Result<ActiveModel> {
         let group = self
             .group_by_name(&model_ref.group)
             .with_context(|| format!("model group '{}' が config に存在しません", model_ref.group))?;
-        Ok(ResolvedEndpoint {
-            url: format!("{}/chat/completions", group.base_url.trim_end_matches('/')),
+        Ok(ActiveModel {
+            group: model_ref.group.clone(),
+            model: model_ref.model.clone(),
+            endpoint_url: format!("{}/chat/completions", group.base_url.trim_end_matches('/')),
             api_key: group.api_key.clone(),
             headers: group.headers.clone(),
         })
@@ -392,7 +408,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_for_model_builds_correct_url() {
+    fn activate_model_builds_correct_fields() {
         let mut s = Settings::default();
         s.model_groups.push(ModelGroup {
             name: "openai".into(),
@@ -402,13 +418,16 @@ mod tests {
             models: vec!["gpt-4o-mini".into()],
         });
         let r = ModelRef::parse("openai:gpt-4o-mini").unwrap();
-        let ep = s.resolve_for_model(&r).unwrap();
-        assert_eq!(ep.url, "https://api.openai.com/v1/chat/completions");
-        assert_eq!(ep.api_key.as_deref(), Some("sk-xxx"));
+        let a = s.activate_model(&r).unwrap();
+        assert_eq!(a.endpoint_url, "https://api.openai.com/v1/chat/completions");
+        assert_eq!(a.api_key.as_deref(), Some("sk-xxx"));
+        assert_eq!(a.group, "openai");
+        assert_eq!(a.model, "gpt-4o-mini");
+        assert_eq!(a.label(), "openai:gpt-4o-mini");
     }
 
     #[test]
-    fn resolve_for_model_strips_trailing_slash() {
+    fn activate_model_strips_trailing_slash() {
         let mut s = Settings::default();
         s.model_groups.push(ModelGroup {
             name: "g".into(),
@@ -418,15 +437,15 @@ mod tests {
             models: vec!["llama3".into()],
         });
         let r = ModelRef::parse("g:llama3").unwrap();
-        let ep = s.resolve_for_model(&r).unwrap();
-        assert_eq!(ep.url, "http://localhost:11434/v1/chat/completions");
+        let a = s.activate_model(&r).unwrap();
+        assert_eq!(a.endpoint_url, "http://localhost:11434/v1/chat/completions");
     }
 
     #[test]
-    fn resolve_for_model_unknown_group_errors() {
+    fn activate_model_unknown_group_errors() {
         let s = Settings::default();
         let r = ModelRef::parse("nonexistent:model").unwrap();
-        assert!(s.resolve_for_model(&r).is_err());
+        assert!(s.activate_model(&r).is_err());
     }
 
     #[test]

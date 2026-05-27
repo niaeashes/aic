@@ -94,7 +94,13 @@ async fn run_repl(config_path: Option<PathBuf>) -> Result<()> {
     // ここで一度だけ `${VAR}` を全フィールドに適用する。以降の利用箇所は展開済み前提。
     settings.expand_secrets(&secrets);
 
-    let current_model = settings.default_model.clone();
+    // default_model があればここで 1 度だけ解決してキャッシュする。
+    // 失敗（group が設定に無い等）は起動を止めず、None で進んで agent 実行時にエラーを出す。
+    let current_model = settings
+        .default_model
+        .as_ref()
+        .and_then(|r| settings.activate_model(r).ok());
+
     let http = reqwest::Client::new();
 
     // MCP 接続。enabled サーバごとに initialize → tools/list を順に試す。
