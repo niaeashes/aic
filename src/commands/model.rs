@@ -13,7 +13,7 @@ use anyhow::{bail, Result};
 use async_trait::async_trait;
 
 use super::{Command, Outcome};
-use crate::config::ModelRef;  // ユーザー入力のパースに引き続き必要
+use crate::config::ModelRef;
 use crate::repl::context::ReplContext;
 
 struct Model;
@@ -73,21 +73,7 @@ fn use_model(arg: &str, ctx: &mut ReplContext) -> Result<Outcome> {
         bail!("使い方: /model use <group>:<model>");
     }
     let model_ref = ModelRef::parse(arg)?;
-    if !ctx.settings.model_exists(&model_ref.group, &model_ref.model) {
-        // group の有無で文面を分け、ユーザに次の一手を分かりやすく示す
-        if ctx.settings.group_by_name(&model_ref.group).is_none() {
-            bail!(
-                "model group '{}' が config に存在しません（`/model` で一覧）",
-                model_ref.group
-            );
-        }
-        bail!(
-            "モデル '{}' は group '{}' に登録されていません（`/model` で一覧）",
-            model_ref.model,
-            model_ref.group
-        );
-    }
-    // Settings から ActiveModel を解決してキャッシュ。以降の agent はこれを直接使う。
+    // activate_model が group 存在・model リスト登録の両方を検証してエラーを返す。
     let active = ctx.settings.activate_model(&model_ref)?;
     println!("モデルを切り替えました: {}", active.label());
     ctx.current_model = Some(active);
