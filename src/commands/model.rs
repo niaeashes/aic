@@ -13,6 +13,7 @@ use anyhow::{bail, Result};
 use async_trait::async_trait;
 
 use super::{Command, Outcome};
+use crate::active_model::ActiveModel;
 use crate::config::ModelRef;
 use crate::repl::context::ReplContext;
 
@@ -73,8 +74,8 @@ fn use_model(arg: &str, ctx: &mut ReplContext) -> Result<Outcome> {
         bail!("使い方: /model use <group>:<model>");
     }
     let model_ref = ModelRef::parse(arg)?;
-    // activate_model が group 存在・model リスト登録の両方を検証してエラーを返す。
-    let active = ctx.settings.activate_model(&model_ref)?;
+    // resolve が group 存在・model リスト登録の両方を検証してエラーを返す。
+    let active = ActiveModel::resolve(&ctx.settings, &model_ref)?;
     println!("モデルを切り替えました: {}", active.label());
     ctx.current_model = Some(active);
     Ok(Outcome::Continue)

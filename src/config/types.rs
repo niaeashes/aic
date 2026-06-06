@@ -1,15 +1,14 @@
 // config/types — 設定型の定義と impl（SPEC §4.2, §11）。
 //
-// このファイルには「型そのもの」だけを置く。ファイルI/O（load / shallow_merge 等）は
-// loader.rs、シークレット復号は secrets.rs にある。
-//
-// 公開型一覧:
-//   Settings      — アプリ全体の設定（YAML から読む）
+// このファイルには「YAML から読む設定スキーマ型」だけを置く:
+//   Settings      — アプリ全体の設定
 //   ModelGroup    — モデルグループ（base_url / api_key / headers / models）
 //   McpServerCfg  — MCP サーバ設定
 //   UiConfig      — UI 設定（history_size, max_tool_iterations）
 //   ModelRef      — `<group>:<model>` 形式の識別子（SPEC §2, §10）
-//   ActiveModel   — `/model use` 時に解決されるキャッシュ型（agent が直接使う）
+//
+// 「ランタイム解決済みの実体」である `ActiveModel` は `src/active_model.rs` に独立。
+// ファイル I/O（load / shallow_merge 等）は loader.rs、シークレット復号は secrets.rs。
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -138,35 +137,11 @@ impl Serialize for ModelRef {
 }
 
 // ---------------------------------------------------------------------------
-// ActiveModel — モデル選択時に 1 度だけ解決される「使用中モデル」の完全な状態
+// Settings ヘルパ — 検索・展開・機密マスク
 // ---------------------------------------------------------------------------
 
-/// `/model use` 時に Settings から解決し、`ReplContext` にキャッシュする型。
-///
-/// agent / コマンド群はこの型だけ見れば LLM を呼べる。Settings の内部構造に依存しない。
-/// ターンごとに再解決しないことで、Settings への後付き依存が生まれない設計にしている。
-#[derive(Debug, Clone)]
-pub struct ActiveModel {
-    /// config 上のグループ名（例: `"openai"`）。`/model` 一覧で `*` を付ける基準に使う。
-    pub group: String,
-    /// ChatRequest の `model` フィールドに入る文字列（例: `"gpt-4o-mini"`）。
-    pub model: String,
-    /// `/chat/completions` を付加済みの完全 URL。
-    pub endpoint_url: String,
-    pub api_key: Option<String>,
-    pub headers: BTreeMap<String, String>,
-}
-
-impl ActiveModel {
-    /// `/model` 一覧・ログ用の `<group>:<model>` 表示文字列。
-    pub fn label(&self) -> String {
-        format!("{}:{}", self.group, self.model)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Settings ヘルパ — 検索・解決・展開
-// ---------------------------------------------------------------------------
+/// 機密値の表示用マスク文字列。`/config show` と `/config setup` のプレビューで使う。
+pub const REDACTED: &str = "***";
 
 impl Settings {
     /// グループ名で `ModelGroup` を引く。O(n) だがグループ数は数個想定。
@@ -179,34 +154,6 @@ impl Settings {
         self.group_by_name(group)
             .map(|g| g.models.iter().any(|m| m == model))
             .unwrap_or(false)
-    }
-
-    /// `model_ref` を `ActiveModel` に解決する。`/model use` 時に 1 度だけ呼ぶ。
-    ///
-    /// group が存在しない / model が group の `models` リストに無い場合はエラー。
-    pub fn activate_model(&self, model_ref: &ModelRef) -> Result<ActiveModel> {
-        let group = self
-            .group_by_name(&model_ref.group)
-            .with_context(|| {
-                format!(
-                    "model group '{}' が config に存在しません（`/model` で一覧）",
-                    model_ref.group
-                )
-            })?;
-        if !group.models.iter().any(|m| m == &model_ref.model) {
-            anyhow::bail!(
-                "モデル '{}' は group '{}' に登録されていません（`/model` で一覧）",
-                model_ref.model,
-                model_ref.group
-            );
-        }
-        Ok(ActiveModel {
-            group: model_ref.group.clone(),
-            model: model_ref.model.clone(),
-            endpoint_url: format!("{}/chat/completions", group.base_url.trim_end_matches('/')),
-            api_key: group.api_key.clone(),
-            headers: group.headers.clone(),
-        })
     }
 
     /// config 内の `${VAR}` を全フィールドに対して展開する（M5, SPEC §5）。
@@ -226,6 +173,29 @@ impl Settings {
                 *v = secrets.expand(v);
             }
         }
+    }
+
+    /// 機密値（api_key / 各 headers の値）を `***` に置換した deep-clone を返す。
+    ///
+    /// 利用箇所: `/config show`、`/config setup` のプレビュー。
+    /// secret-bearing でないヘッダ（Content-Type 等）も区別せず一律マスクする
+    /// — config に手で書く header は基本 auth 系のみ、という運用前提。
+    pub fn redacted(&self) -> Self {
+        let mut s = self.clone();
+        for g in &mut s.model_groups {
+            if g.api_key.is_some() {
+                g.api_key = Some(REDACTED.to_string());
+            }
+            for v in g.headers.values_mut() {
+                *v = REDACTED.to_string();
+            }
+        }
+        for srv in &mut s.mcp_servers {
+            for v in srv.headers.values_mut() {
+                *v = REDACTED.to_string();
+            }
+        }
+        s
     }
 }
 
@@ -265,74 +235,6 @@ mod tests {
     }
 
     #[test]
-    fn activate_model_builds_correct_fields() {
-        let mut s = Settings::default();
-        s.model_groups.push(ModelGroup {
-            name: "openai".into(),
-            base_url: "https://api.openai.com/v1".into(),
-            api_key: Some("sk-xxx".into()),
-            headers: BTreeMap::new(),
-            models: vec!["gpt-4o-mini".into()],
-        });
-        let r = ModelRef::parse("openai:gpt-4o-mini").unwrap();
-        let a = s.activate_model(&r).unwrap();
-        assert_eq!(a.endpoint_url, "https://api.openai.com/v1/chat/completions");
-        assert_eq!(a.api_key.as_deref(), Some("sk-xxx"));
-        assert_eq!(a.label(), "openai:gpt-4o-mini");
-    }
-
-    #[test]
-    fn activate_model_strips_trailing_slash() {
-        let mut s = Settings::default();
-        s.model_groups.push(ModelGroup {
-            name: "g".into(),
-            base_url: "http://localhost:11434/v1/".into(),
-            api_key: None,
-            headers: BTreeMap::new(),
-            models: vec!["llama3".into()],
-        });
-        let r = ModelRef::parse("g:llama3").unwrap();
-        let a = s.activate_model(&r).unwrap();
-        assert_eq!(a.endpoint_url, "http://localhost:11434/v1/chat/completions");
-    }
-
-    #[test]
-    fn activate_model_unknown_group_errors() {
-        let s = Settings::default();
-        let r = ModelRef::parse("nonexistent:model").unwrap();
-        assert!(s.activate_model(&r).is_err());
-    }
-
-    #[test]
-    fn activate_model_rejects_model_not_in_group() {
-        let mut s = Settings::default();
-        s.model_groups.push(ModelGroup {
-            name: "openai".into(),
-            base_url: "https://api.openai.com/v1".into(),
-            api_key: None,
-            headers: BTreeMap::new(),
-            models: vec!["gpt-4o-mini".into()],
-        });
-        let r = ModelRef::parse("openai:nonexistent").unwrap();
-        let err = s.activate_model(&r).unwrap_err();
-        assert!(err.to_string().contains("登録されていません"), "{err}");
-    }
-
-    #[test]
-    fn activate_model_accepts_model_in_group() {
-        let mut s = Settings::default();
-        s.model_groups.push(ModelGroup {
-            name: "openai".into(),
-            base_url: "https://api.openai.com/v1".into(),
-            api_key: None,
-            headers: BTreeMap::new(),
-            models: vec!["gpt-4o-mini".into(), "gpt-4o".into()],
-        });
-        let r = ModelRef::parse("openai:gpt-4o").unwrap();
-        assert!(s.activate_model(&r).is_ok());
-    }
-
-    #[test]
     fn settings_deserializes_from_empty_mapping() {
         let v = serde_yml::Value::Mapping(serde_yml::Mapping::new());
         let s: Settings = serde_yml::from_value(v).unwrap();
@@ -343,7 +245,6 @@ mod tests {
 
     #[test]
     fn expand_secrets_substitutes_into_group_and_mcp_fields() {
-        use crate::config::secrets::Secrets;
         let mut s = Settings::default();
         s.model_groups.push(ModelGroup {
             name: "g".into(),
@@ -378,5 +279,54 @@ mod tests {
         assert_eq!(s.model_groups[0].api_key.as_deref(), Some("Bearer sk-xyz"));
         assert_eq!(s.model_groups[0].headers["X"], "sk-xyz-suffix");
         assert_eq!(s.mcp_servers[0].headers["Authorization"], "Bearer tskey-aaa");
+    }
+
+    #[test]
+    fn redacted_masks_api_key_and_headers() {
+        let mut headers = BTreeMap::new();
+        headers.insert("Authorization".into(), "Bearer sk-real".into());
+        let mut mcp_headers = BTreeMap::new();
+        mcp_headers.insert("X-Auth".into(), "secret-token".into());
+
+        let s = Settings {
+            model_groups: vec![ModelGroup {
+                name: "openai".into(),
+                base_url: "https://api.openai.com/v1".into(),
+                api_key: Some("sk-very-real".into()),
+                headers,
+                models: vec!["gpt-4o-mini".into()],
+            }],
+            mcp_servers: vec![McpServerCfg {
+                name: "tools".into(),
+                url: "http://example/mcp".into(),
+                headers: mcp_headers,
+                enabled: true,
+            }],
+            ..Default::default()
+        };
+
+        let r = s.redacted();
+        assert_eq!(r.model_groups[0].api_key.as_deref(), Some(REDACTED));
+        assert_eq!(r.model_groups[0].headers["Authorization"], REDACTED);
+        assert_eq!(r.mcp_servers[0].headers["X-Auth"], REDACTED);
+        // 非秘匿フィールドは保持
+        assert_eq!(r.model_groups[0].base_url, "https://api.openai.com/v1");
+        assert_eq!(r.model_groups[0].models, vec!["gpt-4o-mini".to_string()]);
+    }
+
+    #[test]
+    fn redacted_leaves_none_api_key_as_none() {
+        let s = Settings {
+            model_groups: vec![ModelGroup {
+                name: "local".into(),
+                base_url: "http://127.0.0.1:11434/v1".into(),
+                api_key: None,
+                headers: BTreeMap::new(),
+                models: vec![],
+            }],
+            ..Default::default()
+        };
+        let r = s.redacted();
+        assert!(r.model_groups[0].api_key.is_none());
     }
 }

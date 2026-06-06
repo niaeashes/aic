@@ -21,6 +21,7 @@ use crate::repl::context::ReplContext;
 
 pub mod context;
 pub mod dispatch;
+pub mod prompt;
 
 const PROMPT: &str = "aic> ";
 const HISTORY_FILE: &str = "history.txt";

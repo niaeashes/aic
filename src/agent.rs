@@ -4,7 +4,7 @@
 //
 //   1. user メッセージを session に push（ターン頭、1 回だけ）
 //   2. ループ反復 i = 0..max_tool_iterations:
-//      a. Settings::resolve_for_model でエンドポイント情報を取得
+//      a. ctx.require_active_model() で配線済みエンドポイント情報を取得
 //         - tools には ctx.mcp.as_openai_tools() を渡す（空なら None でフィールド省略）
 //      b. SSE ストリームを回し、content と tool_calls を蓄積
 //      c. 蓄積を assistant メッセージとして push
@@ -35,13 +35,8 @@ pub async fn run_turn(ctx: &mut ReplContext, user_input: String) -> Result<()> {
     ctx.session.messages.push(Message::user(user_input));
 
     // ActiveModel はモデル選択時に 1 度だけ解決済み。agent は Settings を知らなくていい。
-    let active = ctx.current_model.as_ref().context(
-        "モデルが未選択です。config の default_model か、/model use <group>:<model> で選択してください",
-    )?;
-    let model_name = active.model.clone();
-    let endpoint_url = active.endpoint_url.clone();
-    let api_key = active.api_key.clone();
-    let headers = active.headers.clone();
+    // clone するのは「以降 ctx を &mut で借り直したい（mcp.call 等）」ため。
+    let active = ctx.require_active_model()?;
     let max_iter = ctx.settings.ui.max_tool_iterations;
     let client = ChatClient::new(ctx.http.clone());
 
@@ -55,15 +50,20 @@ pub async fn run_turn(ctx: &mut ReplContext, user_input: String) -> Result<()> {
         };
 
         let request = ChatRequest {
-            model: model_name.clone(),
+            model: active.model.clone(),
             messages: ctx.session.messages.clone(),
             tools,
             stream: true,
         };
 
-        let assistant =
-            stream_assistant(&client, &endpoint_url, api_key.as_deref(), &headers, &request)
-                .await?;
+        let assistant = stream_assistant(
+            &client,
+            &active.endpoint_url,
+            active.api_key.as_deref(),
+            &active.headers,
+            &request,
+        )
+        .await?;
         let tool_calls = assistant.tool_calls().to_vec();
         ctx.session.messages.push(assistant);
 
@@ -222,7 +222,6 @@ fn arg_preview(raw: &str) -> String {
 
 #[derive(Default)]
 struct ToolCallAccum {
-    /// SPEC §6.1: 先頭フラグメントにしか来ないので None = まだ受信していない。
     id: Option<String>,
     name: Option<String>,
     arguments: String,

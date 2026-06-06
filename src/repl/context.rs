@@ -6,7 +6,10 @@
 // `Secrets` は main.rs で `expand_secrets` を呼び出した後は不要になるため、
 // `ReplContext` には含めない。展開済みの Settings だけを保持する。
 
-use crate::config::{ActiveModel, Settings};
+use anyhow::{Context, Result};
+
+use crate::active_model::ActiveModel;
+use crate::config::Settings;
 use crate::llm::types::Message;
 use crate::mcp::McpManager;
 
@@ -31,11 +34,23 @@ pub struct ReplContext {
     pub settings: Settings,
     pub session: Session,
     pub http: reqwest::Client,
-    /// 現在使用中のモデル。`/model use` 時に `Settings::activate_model` で解決して
+    /// 現在使用中のモデル。`/model use` 時に `ActiveModel::resolve` で解決して
     /// キャッシュする。config に `default_model` が無ければ None で起動。
     /// `agent::run_turn` が None だとエラーで弾く（ターンごとの再解決は不要）。
     pub current_model: Option<ActiveModel>,
     /// MCP サーバ群 + 公開ツールカタログ（M6）。
     /// 起動時の接続失敗は per-server で握りつぶし、空でも REPL は回る。
     pub mcp: McpManager,
+}
+
+impl ReplContext {
+    /// 現在の `ActiveModel` を **clone して** 返す。`agent::run_turn` で `ctx` を
+    /// `&mut` 再借用したい場面のため、`&ActiveModel` の借用を持ち続けない設計。
+    ///
+    /// 未選択時はユーザ向けエラーを返す（呼び出し側は `?` で素直に伝搬すれば良い）。
+    pub fn require_active_model(&self) -> Result<ActiveModel> {
+        self.current_model.clone().context(
+            "モデルが未選択です。config の default_model か、/model use <group>:<model> で選択してください",
+        )
+    }
 }

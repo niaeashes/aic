@@ -16,12 +16,15 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
+mod active_model;
 mod agent;
 mod commands;
 mod config;
 mod llm;
 mod mcp;
 mod repl;
+
+use active_model::ActiveModel;
 
 #[derive(Debug, Parser)]
 #[command(name = "aic", about = "minimal interactive chat CLI")]
@@ -99,7 +102,7 @@ async fn run_repl(config_path: Option<PathBuf>) -> Result<()> {
     let current_model = settings
         .default_model
         .as_ref()
-        .and_then(|r| settings.activate_model(r).ok());
+        .and_then(|r| ActiveModel::resolve(&settings, r).ok());
 
     let http = reqwest::Client::new();
 
