@@ -18,10 +18,12 @@ use rustyline::{Config, DefaultEditor};
 
 use crate::commands::Outcome;
 use crate::repl::context::ReplContext;
+use crate::repl::view::TerminalView;
 
 pub mod context;
 pub mod dispatch;
 pub mod prompt;
+pub mod view;
 
 const PROMPT: &str = "aic> ";
 const HISTORY_FILE: &str = "history.txt";
@@ -62,6 +64,9 @@ pub async fn run(ctx: &mut ReplContext) -> Result<()> {
 }
 
 async fn run_loop(ctx: &mut ReplContext, rl: &mut DefaultEditor) -> Result<()> {
+    // 端末描画は 1 つの TerminalView に集約。per-message 状態は assistant_start で
+    // 都度リセットされるため、セッション通しで使い回してよい。
+    let mut view = TerminalView::new();
     loop {
         match rl.readline(PROMPT) {
             Ok(line) => {
@@ -86,7 +91,7 @@ async fn run_loop(ctx: &mut ReplContext, rl: &mut DefaultEditor) -> Result<()> {
                 }
 
                 // チャット入力 → エージェントループ
-                if let Err(e) = crate::agent::run_turn(ctx, trimmed.to_string()).await {
+                if let Err(e) = crate::agent::run_turn(ctx, trimmed.to_string(), &mut view).await {
                     eprintln!("error: {e:#}");
                 }
             }
