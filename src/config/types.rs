@@ -149,13 +149,6 @@ impl Settings {
         self.model_groups.iter().find(|g| g.name == name)
     }
 
-    /// `<group>` が存在し、その `models` に `<model>` が含まれていれば true。
-    pub fn model_exists(&self, group: &str, model: &str) -> bool {
-        self.group_by_name(group)
-            .map(|g| g.models.iter().any(|m| m == model))
-            .unwrap_or(false)
-    }
-
     /// config 内の `${VAR}` を全フィールドに対して展開する（M5, SPEC §5）。
     ///
     /// 起動時に 1 回だけ呼ぶ。以降の利用箇所は展開済み前提。

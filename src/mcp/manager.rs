@@ -26,14 +26,17 @@ use crate::mcp::protocol::{
 use crate::mcp::transport::Transport;
 
 /// 1 つの MCP サーバの稼働状態 + 取得済みツール一覧。
-pub struct McpServer {
-    pub name: String,
-    pub tools: Vec<McpToolDef>,
+///
+/// サーバ名は公開ツール名（`<server>__<tool>`）に埋め込み済みで `catalog` から復元
+/// できるため、ここでは保持しない（`tools` は `as_openai_tools` の schema 引き当て用）。
+struct McpServer {
+    tools: Vec<McpToolDef>,
     transport: Transport,
 }
 
 pub struct McpManager {
-    pub servers: Vec<McpServer>,
+    /// 接続済みサーバ群。index は `catalog` の値から参照される（内部表現なので非公開）。
+    servers: Vec<McpServer>,
     /// 公開名 `"<server>__<tool>"` → (server_idx, 実ツール名)。SPEC §7.4。
     /// BTreeMap なのでキー順が常にソート済み — `as_openai_tools` で再ソート不要。
     catalog: BTreeMap<String, (usize, String)>,
@@ -79,11 +82,18 @@ impl McpManager {
                 }
             }
         }
+        // LLM に渡る公開名（`<server>__<tool>`）の最終一覧を 1 度だけ出す。
+        // per-server ログは実ツール名だが、ここは衝突回避済みの公開名なので
+        // 「モデルから実際に見えるカタログ」を確認できる（SPEC §7.4, MILESTONES M6 DoD）。
+        let names = mgr.public_tool_names();
+        if !names.is_empty() {
+            eprintln!("mcp: 公開ツール {} 件: {}", names.len(), names.join(", "));
+        }
         mgr
     }
 
     /// 全公開ツール名（`<server>__<tool>`）を文字列ソート順で返す。
-    /// `/help` 系コマンド / 起動ログ用。
+    /// 起動時のカタログ要約ログで使う。
     pub fn public_tool_names(&self) -> Vec<String> {
         self.catalog.keys().cloned().collect()
     }
@@ -161,11 +171,7 @@ impl McpManager {
             let public = format!("{}__{}", name, t.name);
             self.catalog.insert(public, (idx, t.name.clone()));
         }
-        self.servers.push(McpServer {
-            name,
-            tools,
-            transport,
-        });
+        self.servers.push(McpServer { tools, transport });
     }
 }
 

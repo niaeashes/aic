@@ -15,7 +15,7 @@
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 
-use super::{Command, Outcome};
+use super::{split_first_token, Command, Outcome};
 use crate::config::{home_config_path, wizard, Settings};
 use crate::repl::context::ReplContext;
 use crate::repl::prompt::prompt_bool;
@@ -33,11 +33,7 @@ impl Command for Config {
     }
 
     async fn run(&self, args: &str, ctx: &mut ReplContext) -> Result<Outcome> {
-        let trimmed = args.trim();
-        let (sub, _rest) = match trimmed.find(char::is_whitespace) {
-            Some(idx) => (&trimmed[..idx], trimmed[idx + 1..].trim()),
-            None => (trimmed, ""),
-        };
+        let (sub, _rest) = split_first_token(args.trim());
         match sub {
             "" | "show" => show(&ctx.settings),
             "setup" => setup(ctx),

@@ -12,7 +12,7 @@
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 
-use super::{Command, Outcome};
+use super::{split_first_token, Command, Outcome};
 use crate::active_model::ActiveModel;
 use crate::config::ModelRef;
 use crate::repl::context::ReplContext;
@@ -37,10 +37,7 @@ impl Command for Model {
         }
 
         // `use <ref>` の形のみサポート。将来サブコマンドが増えたら match に展開する。
-        let (sub, rest) = match trimmed.find(char::is_whitespace) {
-            Some(idx) => (&trimmed[..idx], trimmed[idx + 1..].trim()),
-            None => (trimmed, ""),
-        };
+        let (sub, rest) = split_first_token(trimmed);
         match sub {
             "use" => use_model(rest, ctx),
             other => {
