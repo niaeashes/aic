@@ -100,6 +100,12 @@ impl McpManager {
         self.catalog.keys().cloned().collect()
     }
 
+    /// Number of MCP servers that completed `initialize` + `tools/list` at startup.
+    /// Used by `/doctor` to flag the "configured but none connected" case.
+    pub fn connected_server_count(&self) -> usize {
+        self.servers.len()
+    }
+
     /// Build the OpenAI-compatible `tools` array. If empty, callers should
     /// substitute `None` so the `ChatRequest.tools` field can be omitted entirely.
     pub fn as_openai_tools(&self) -> Vec<Tool> {

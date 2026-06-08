@@ -136,6 +136,7 @@ assistant> The weather in Tokyo is...
 | `/model use <group>:<model>` | Switch model (e.g. `/model use local:qwen2.5-coder:32b`) |
 | `/config show` | Show current Settings as YAML (api_key / headers redacted) |
 | `/config setup` | Interactively generate the home `config.yaml` |
+| `/doctor` | Run environment checks (config / keyring / MCP) with setup hints |
 
 ---
 
@@ -190,19 +191,40 @@ untouched (SPEC §9.3).
 
 ---
 
+## Prerequisites
+
+aic itself only needs the Rust toolchain (rustc 1.70+) for `cargo install`.
+Sealed secrets (`aic env seal`) need a system keyring; chat and MCP work without one.
+
+### macOS
+Nothing extra — the built-in Keychain is used.
+
+### Linux
+For sealed secrets, install a Secret Service provider on D-Bus:
+
+- **GNOME / KDE / XFCE**: usually pre-installed (`gnome-keyring` / `kwallet`)
+- **Minimal WMs (sway, Hyprland, i3, etc.)**:
+  ```sh
+  sudo pacman -S gnome-keyring   # or your distro's package manager
+  # Then enable PAM auto-unlock, or start it from your session config:
+  exec gnome-keyring-daemon --start --components=secrets
+  ```
+  Quick check it's up: `busctl --user list | grep secret`
+
+Without a Secret Service, aic falls back to plaintext `env.json` or environment
+variables. Run `aic` then `/doctor` to see exactly what's wired up.
+
+### Other platforms (Windows, BSD)
+Chat and MCP work; sealed secrets do not. Use plaintext `env.json` or env vars.
+
 ## Installation
 
 ```sh
 cargo install --git https://github.com/niaeashes/aic
 ```
 
-Installs to `~/.cargo/bin/aic`. Requires a Rust toolchain (rustc 1.70+).
-Because it uses macOS Keychain, `aic env seal/unseal` only works on macOS today.
-Chat and MCP work on any platform — resolve `${VAR}` via plaintext `env.json` or
-environment variables.
-
-If `~/.cargo/bin` is not on your `PATH` yet (i.e. you didn't install Rust via
-rustup), add it manually:
+Installs to `~/.cargo/bin/aic`. If `~/.cargo/bin` is not on your `PATH` yet
+(i.e. you didn't install Rust via rustup), add it manually:
 
 ```sh
 export PATH="$HOME/.cargo/bin:$PATH"

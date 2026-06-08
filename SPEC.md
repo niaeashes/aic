@@ -226,10 +226,25 @@ Both files live in the home config directory.
 
 `env.json.enc` = `base64( nonce(12B) || ciphertext_with_tag )`.
 
-### 5.4 Non-macOS fallback
+### 5.4 Linux / other platforms
 
-Keychain is not used. If `env.json` (plaintext) exists, it is the secrets source;
-otherwise the process environment is the only source.
+**Linux** uses Secret Service over D-Bus as the keyring backend (via the
+`sync-secret-service` feature of the `keyring` crate). Any Secret Service
+provider works: `gnome-keyring`, `kwallet`, KeePassXC, etc. The on-disk format
+and the 32-byte key length match macOS exactly. Once a provider is running,
+`aic env seal/unseal` behaves identically to macOS.
+
+If no Secret Service is reachable at startup, aic emits a warning that includes
+setup hints and falls back to plaintext `env.json` (if present) or environment
+variables.
+
+**Other platforms (Windows, BSD)**: the system keyring path is not wired up.
+aic still loads `env.json` plaintext or process environment variables, and the
+REPL / MCP paths work normally. `aic env seal/unseal` returns a clear error
+asking for a supported platform.
+
+Across all platforms, `/doctor` (a REPL command) reports the keyring state,
+config presence, MCP connections, and what to do next when something is off.
 
 ---
 

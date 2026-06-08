@@ -55,6 +55,7 @@ inventory::collect!(&'static dyn Command);
 
 pub mod clear;
 pub mod config;
+pub mod doctor;
 pub mod exit;
 pub mod help;
 pub mod model;

@@ -45,8 +45,6 @@ inventory = "0.3"
 
 # Secrets
 chacha20poly1305 = "0.10"
-# keyring 3.x requires explicitly selecting a backend feature. MVP is macOS Keychain only.
-keyring = { version = "3", features = ["apple-native"] }
 base64 = "0.22"
 rand = "0.8"
 
@@ -59,3 +57,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Stream utilities (for reqwest's bytes_stream)
 futures-util = "0.3"
+
+# keyring 3.x picks a backend per platform feature.
+# Each target gets only the backend it needs; on unsupported platforms the
+# crate isn't compiled at all and keychain.rs falls back to a runtime bail.
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service"] }

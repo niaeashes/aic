@@ -3,7 +3,8 @@
 // Resolution order follows SPEC §5: secrets map → process environment variables.
 // The secrets map is built at startup via this fallback chain:
 //
-//   1. (macOS only) decrypt `<config_dir>/env.json.enc` with the Keychain key
+//   1. decrypt `<config_dir>/env.json.enc` via the system keyring
+//      (macOS Keychain or Linux Secret Service; unsupported platforms bail)
 //   2. `<config_dir>/env.json` (plaintext, for local editing)
 //   3. Environment variables only
 //
@@ -12,7 +13,7 @@
 //
 // Sub-module layout (introduced when secrets.rs was split):
 //   crypto.rs    — ChaCha20-Poly1305 AEAD (pure functions)
-//   keychain.rs  — macOS Keychain key management (non-macOS bails at runtime)
+//   keychain.rs  — System keyring key management (macOS/Linux; others bail)
 //   storage.rs   — env.json / env.json.enc file I/O
 //   cli.rs       — `aic env seal/unseal` body (called by main.rs)
 //
@@ -29,6 +30,29 @@ pub use cli::{seal, unseal};
 
 use std::collections::HashMap;
 use std::path::Path;
+
+use anyhow::Result;
+
+/// Probe the system keyring without creating or modifying any entry.
+///
+/// Used by `/doctor` to report environment readiness:
+///   - `Ok(true)`  : the backend is reachable AND a key is stored
+///   - `Ok(false)` : the backend is reachable but no key is stored yet
+///   - `Err(_)`    : the backend itself is unreachable (the error message
+///                   includes setup hints when applicable)
+pub fn keyring_status() -> Result<bool> {
+    keychain::probe()
+}
+
+/// Whether `<config_dir>/env.json.enc` exists. Cheap stat — used by `/doctor`.
+pub fn enc_path_exists(config_dir: &Path) -> bool {
+    config_dir.join(ENV_JSON_ENC).exists()
+}
+
+/// Whether `<config_dir>/env.json` (plaintext) exists. Cheap stat — used by `/doctor`.
+pub fn plain_path_exists(config_dir: &Path) -> bool {
+    config_dir.join(ENV_JSON).exists()
+}
 
 // Constants shared by sub-modules. `Secrets::load` uses these via
 // `config_dir.join(...)`, so they live in mod.rs. cli.rs pulls them via
@@ -57,9 +81,10 @@ impl Secrets {
     /// fallback. The returned `Secrets` always has environment-variable fallback,
     /// so the caller doesn't need to worry about partial failures (SPEC §5.2 end).
     ///
-    /// On non-macOS when `env.json.enc` exists, `storage::decrypt_env_file` will
-    /// bail inside `keychain::load_key()`. That error string is included in the
-    /// fallback warning, so we don't need a cfg gate here.
+    /// On platforms without a supported keyring (anything other than macOS or
+    /// Linux), `storage::decrypt_env_file` bails inside `keychain::load_key()`.
+    /// That error string is included in the fallback warning, so no cfg gate
+    /// is needed here.
     pub fn load(config_dir: &Path) -> Self {
         let enc_path = config_dir.join(ENV_JSON_ENC);
         let plain_path = config_dir.join(ENV_JSON);
