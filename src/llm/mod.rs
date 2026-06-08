@@ -1,8 +1,9 @@
-// llm — openai-compatible /chat/completions クライアント（SPEC §6, §14-2）。
+// llm — openai-compatible /chat/completions client (SPEC §6, §14-2).
 //
-// 「provider 抽象化はしない」方針（SPEC §1, §14）に従い、ChatClient はトレイトでは
-// なく具体型 1 つのみ。グループ別の base_url / api_key / headers は呼び出し側が
-// 解決して引数で渡す（Settings から引くのは agent.rs の責務）。
+// Per the "no provider abstraction" policy (SPEC §1, §14), `ChatClient` is a
+// single concrete type, not a trait. Per-group base_url / api_key / headers are
+// resolved by the caller and passed in — pulling them from Settings is the
+// agent's job, not ours.
 
 use std::collections::BTreeMap;
 
@@ -15,9 +16,10 @@ use crate::llm::types::ChatRequest;
 pub mod stream;
 pub mod types;
 
-/// HTTP クライアントを共有するための薄いラッパ。
+/// Thin wrapper that shares the underlying HTTP client.
 ///
-/// `reqwest::Client` 自体が Arc 内部状態なので、`ChatClient` は使い捨てで構わない。
+/// `reqwest::Client` is already Arc-internal, so `ChatClient` can be created
+/// per call without performance worry.
 #[derive(Debug, Clone)]
 pub struct ChatClient {
     http: reqwest::Client,
@@ -28,15 +30,16 @@ impl ChatClient {
         Self { http }
     }
 
-    /// `{endpoint}` に `ChatRequest` を POST し、SSE をパースしたストリームを返す。
+    /// POST a `ChatRequest` to `{endpoint}` and return the SSE-parsed stream.
     ///
-    /// 失敗パターン:
-    ///   - 接続自体の失敗 → `?` で `Err`（agent 側に伝播）。
-    ///   - HTTP 4xx/5xx  → 本文を読み取って `bail!`。LLM プロバイダのエラー本文が
-    ///                       そのままユーザに見えるのがデバッグ上一番ありがたい。
+    /// Failure modes:
+    ///   - Connection-level failure → `?` propagates Err to the agent.
+    ///   - HTTP 4xx/5xx           → read the body and `bail!`. Showing the
+    ///                                provider's raw error body is the most
+    ///                                useful thing for debugging.
     ///
-    /// `api_key` が `Some("")` や None の場合は Authorization ヘッダを付けない
-    /// （ollama 等、認証なしエンドポイントへの対応）。
+    /// If `api_key` is `Some("")` or `None`, no Authorization header is added
+    /// (handles ollama and other auth-less endpoints).
     pub async fn stream(
         &self,
         endpoint: &str,
@@ -60,7 +63,7 @@ impl ChatClient {
         let resp = builder
             .send()
             .await
-            .with_context(|| format!("LLM endpoint への POST 失敗: {endpoint}"))?;
+            .with_context(|| format!("failed to POST to LLM endpoint: {endpoint}"))?;
 
         let status = resp.status();
         if !status.is_success() {

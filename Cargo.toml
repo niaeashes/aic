@@ -13,21 +13,21 @@ categories = ["command-line-utilities"]
 name = "aic"
 path = "src/main.rs"
 
-# 配布バイナリは strip + LTO で削る。`cargo install --git` 経由ではここがそのまま効く。
+# Release binary is stripped and LTO'd. `cargo install --git` picks this up directly.
 [profile.release]
-strip = true        # debug シンボルを落として ~30-50% 削減
-lto = true          # link-time optimization で速度 + サイズ両方寄与
-codegen-units = 1   # コンパイル時間↑ だが最適化↑（個人配布なら許容）
+strip = true        # Drop debug symbols (~30-50% size reduction)
+lto = true          # Link-time optimization (speed + size)
+codegen-units = 1   # Slower build, better optimization (acceptable for personal distribution)
 
 [dependencies]
-# 非同期ランタイム
+# Async runtime
 tokio = { version = "1", features = ["full"] }
 
 # HTTP
 reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls"] }
 eventsource-stream = "0.2"
 
-# シリアライズ
+# Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yml = "0.0.12"
@@ -36,26 +36,26 @@ serde_yml = "0.0.12"
 clap = { version = "4", features = ["derive"] }
 rustyline = "14"
 
-# エラー
+# Errors
 anyhow = "1"
 
-# コマンド登録
+# Command registration
 async-trait = "0.1"
 inventory = "0.3"
 
-# シークレット
+# Secrets
 chacha20poly1305 = "0.10"
-# keyring 3.x はバックエンドを feature で明示する必要がある。MVP は macOS Keychain のみ。
+# keyring 3.x requires explicitly selecting a backend feature. MVP is macOS Keychain only.
 keyring = { version = "3", features = ["apple-native"] }
 base64 = "0.22"
 rand = "0.8"
 
-# パス解決
+# Path resolution
 directories = "5"
 
-# ロギング
+# Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Stream ユーティリティ（reqwest の bytes_stream を扱うため）
+# Stream utilities (for reqwest's bytes_stream)
 futures-util = "0.3"

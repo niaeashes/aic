@@ -1,14 +1,16 @@
-// repl — rustyline ベースの対話ループ（SPEC §9.1）。
+// repl — rustyline-based interactive loop (SPEC §9.1).
 //
-// M3 で `/`-始まりはすべて `dispatch::dispatch` に丸投げするようリファクタした。
-// `/exit` も Command として登録されており、`Outcome::Exit` を見てループを抜ける。
+// In M3 we refactored so any `/`-prefixed input goes straight through to
+// `dispatch::dispatch`. `/exit` itself is now a Command — we exit the loop when
+// it returns `Outcome::Exit`.
 //
-// rustyline の readline は同期ブロッキングだが、`#[tokio::main]` の multi-thread
-// ランタイム上で呼ぶので、1 ワーカーをブロックするだけで他のタスクは進める。
-// 単一ユーザ対話 CLI として割り切る。
+// `rustyline`'s readline is synchronous and blocking, but we call it on the
+// `#[tokio::main]` multi-threaded runtime, so blocking one worker leaves other
+// tasks free. As a single-user interactive CLI, that's a fine trade-off.
 //
-// M8: 履歴ファイルを `config_dir/history.txt` に保存する。起動時に load、終了時に
-// save。`history_size` で件数上限を引く。読み書き失敗は警告のみで継続。
+// M8: persist the history file at `config_dir/history.txt`. Loaded at startup,
+// saved at shutdown. `history_size` caps the entry count. Read/write failures
+// only emit a warning — they never block the loop.
 
 use std::path::PathBuf;
 
@@ -31,11 +33,12 @@ const HISTORY_FILE: &str = "history.txt";
 pub async fn run(ctx: &mut ReplContext) -> Result<()> {
     let cfg = Config::builder()
         .max_history_size(ctx.settings.ui.history_size)?
-        .auto_add_history(false) // 自分で `add_history_entry` する
+        .auto_add_history(false) // We add entries ourselves.
         .build();
     let mut rl = DefaultEditor::with_config(cfg)?;
 
-    // 履歴ファイルのパスは config_dir 配下。config_dir が空（テスト等）なら無効化。
+    // The history file lives under config_dir. Empty config_dir (e.g. in tests)
+    // disables persistence.
     let history_path: Option<PathBuf> = if ctx.settings.config_dir.as_os_str().is_empty() {
         None
     } else {
@@ -44,28 +47,28 @@ pub async fn run(ctx: &mut ReplContext) -> Result<()> {
     if let Some(p) = history_path.as_deref() {
         if p.exists() {
             if let Err(e) = rl.load_history(p) {
-                tracing::warn!("history 読み込み失敗（{}）: {e:#}", p.display());
+                tracing::warn!("failed to load history ({}): {e:#}", p.display());
             }
         }
     }
 
     let result = run_loop(ctx, &mut rl).await;
 
-    // 終了経路（正常 / エラー）にかかわらず履歴は保存しておきたい。
+    // Save history regardless of the exit path (clean or erroring).
     if let Some(p) = history_path.as_deref() {
         if let Some(parent) = p.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
         if let Err(e) = rl.save_history(p) {
-            tracing::warn!("history 保存失敗（{}）: {e:#}", p.display());
+            tracing::warn!("failed to save history ({}): {e:#}", p.display());
         }
     }
     result
 }
 
 async fn run_loop(ctx: &mut ReplContext, rl: &mut DefaultEditor) -> Result<()> {
-    // 端末描画は 1 つの TerminalView に集約。per-message 状態は assistant_start で
-    // 都度リセットされるため、セッション通しで使い回してよい。
+    // One TerminalView for the whole session. Per-message state is reset by
+    // `assistant_start`, so reusing it across turns is fine.
     let mut view = TerminalView::new();
     loop {
         match rl.readline(PROMPT) {
@@ -74,7 +77,8 @@ async fn run_loop(ctx: &mut ReplContext, rl: &mut DefaultEditor) -> Result<()> {
                 if trimmed.is_empty() {
                     continue;
                 }
-                // 直前と同じ入力は履歴に積まない（rustyline の HistoryEntry::Smart 相当）
+                // Don't add the line to history if it's identical to the previous
+                // entry (rustyline's HistoryEntry::Smart equivalent).
                 let dedup = match rl.history().iter().next_back() {
                     Some(last) => last == trimmed,
                     None => false,
@@ -90,17 +94,17 @@ async fn run_loop(ctx: &mut ReplContext, rl: &mut DefaultEditor) -> Result<()> {
                     }
                 }
 
-                // チャット入力 → エージェントループ
+                // Chat input → agent loop
                 if let Err(e) = crate::agent::run_turn(ctx, trimmed.to_string(), &mut view).await {
                     eprintln!("error: {e:#}");
                 }
             }
-            // Ctrl-C は入力をキャンセルしてプロンプトに戻る
+            // Ctrl-C cancels the current input and returns to the prompt.
             Err(ReadlineError::Interrupted) => continue,
-            // Ctrl-D は終了
+            // Ctrl-D exits.
             Err(ReadlineError::Eof) => break,
             Err(e) => {
-                eprintln!("error: 入力の読み取りに失敗: {e}");
+                eprintln!("error: failed to read input: {e}");
                 break;
             }
         }

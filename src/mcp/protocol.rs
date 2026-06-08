@@ -1,37 +1,36 @@
-// protocol — JSON-RPC 2.0 と MCP メソッドの最小型（SPEC §7）。
+// protocol — minimal types for JSON-RPC 2.0 and MCP methods (SPEC §7).
 //
-// `aic` が必要なのは:
+// `aic` only needs four methods:
 //   - initialize / notifications/initialized
 //   - tools/list
 //   - tools/call
-// の 4 つだけ。サーバが余計に送ってくる notifications/* は無視する。
+// Anything else the server sends (notifications/*) is dropped on the floor.
 //
-// 受信側 (`JsonRpcResponse`) は `id` / `result` / `error` / `method` を全部 Optional に
-// しておく。サーバ起動オリジン通知（id 無し）と通常応答（id 有り）の双方が同じ SSE
-// 上に流れてきても、`result.is_some() || error.is_some()` で「自分の応答かどうか」を
-// 判定できるようにするため。
+// On the receive side (`JsonRpcResponse`), `id` / `result` / `error` / `method`
+// are all optional. Server-originated notifications (no id) and ordinary
+// responses (with id) can both arrive on the same SSE; we tell them apart with
+// `result.is_some() || error.is_some()` ("is this my response?").
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// クライアントが宣言する MCP プロトコルバージョン。SPEC §7.1。
+/// The MCP protocol version we declare. SPEC §7.1.
 ///
-/// サーバが別バージョンで応答してきても、`initialize` が成功する限りそのまま続行する
-/// （細かな capabilities 交渉は MVP では行わない）。
+/// If the server responds with a different version, we keep going as long as
+/// `initialize` succeeded (no capability negotiation in the MVP).
 pub const PROTOCOL_VERSION: &str = "2025-03-26";
 
 // ---------------------------------------------------------------------------
-// JSON-RPC 2.0 — 送信用 / 受信用
+// JSON-RPC 2.0 — outbound / inbound
 // ---------------------------------------------------------------------------
 
-/// 受信側 JSON-RPC メッセージ（response / server→client notification 兼用）。
+/// A received JSON-RPC message (response or server→client notification).
 ///
-/// MCP の SSE では同じストリームに「自分への応答」と「サーバ起点 notification」が
-/// 混ざる可能性があるため、`method` が入っているフレームは notification として
-/// スキップ判定できるようにしておく。
+/// Because MCP's SSE may mix "responses to us" with "server-originated
+/// notifications", `method` is kept around so the latter can be filtered out.
 ///
-/// `id` / `method` は今は filter 判定に使っていない（`result/error` の有無で済む）が、
-/// JSON-RPC 互換のため保持する。
+/// `id` / `method` aren't used for filtering today (`result/error` presence is
+/// enough), but we keep them for JSON-RPC compatibility.
 #[derive(Debug, Clone, Deserialize)]
 pub struct JsonRpcResponse {
     #[serde(default)]
@@ -41,7 +40,7 @@ pub struct JsonRpcResponse {
     pub result: Option<Value>,
     #[serde(default)]
     pub error: Option<JsonRpcError>,
-    /// サーバ起点の request / notification ではここが入る（aic は無視する）。
+    /// Filled when the frame is a server-originated request/notification (aic ignores them).
     #[serde(default)]
     #[allow(dead_code)]
     pub method: Option<String>,
@@ -51,8 +50,8 @@ pub struct JsonRpcResponse {
 pub struct JsonRpcError {
     pub code: i64,
     pub message: String,
-    /// JSON-RPC 仕様の任意フィールド。今はメッセージしか表示していないが、
-    /// 将来詳細表示に使う想定で残しておく。
+    /// The optional JSON-RPC `data` field. Today we only display the message,
+    /// but we keep this around for future detailed display.
     #[serde(default)]
     #[allow(dead_code)]
     pub data: Option<Value>,
@@ -66,7 +65,7 @@ pub struct JsonRpcError {
 pub struct InitializeParams {
     #[serde(rename = "protocolVersion")]
     pub protocol_version: String,
-    /// MVP では空オブジェクト固定。tools 以外の機能を使わないので capabilities 交渉は無い。
+    /// Empty object in the MVP. We don't negotiate beyond tools, so no capability negotiation is needed.
     pub capabilities: Value,
     #[serde(rename = "clientInfo")]
     pub client_info: ClientInfo,
@@ -86,7 +85,7 @@ pub struct ClientInfo {
 pub struct ToolsListResult {
     #[serde(default)]
     pub tools: Vec<McpToolDef>,
-    /// ページング指示。MVP では 1 ページ目だけ取って打ち切る。
+    /// Pagination cursor. In the MVP we only fetch the first page and stop.
     #[serde(default, rename = "nextCursor")]
     #[allow(dead_code)]
     pub next_cursor: Option<String>,
@@ -97,7 +96,7 @@ pub struct McpToolDef {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
-    /// JSON Schema。OpenAI tools の `function.parameters` にそのまま流し込む。
+    /// JSON Schema. Plumbed through to OpenAI tools' `function.parameters` verbatim.
     #[serde(default = "default_schema", rename = "inputSchema")]
     pub input_schema: Value,
 }
@@ -113,7 +112,7 @@ fn default_schema() -> Value {
 #[derive(Debug, Serialize)]
 pub struct ToolsCallParams<'a> {
     pub name: &'a str,
-    /// LLM が返してくる `function.arguments`（JSON 文字列）を `Value` にパースしたもの。
+    /// The LLM's `function.arguments` (JSON string) parsed into a `Value`.
     pub arguments: Value,
 }
 
@@ -121,18 +120,20 @@ pub struct ToolsCallParams<'a> {
 pub struct ToolsCallResult {
     #[serde(default)]
     pub content: Vec<ContentBlock>,
-    /// `true` ならツール側エラー扱い。ループ継続のため Err にはせず文面だけ拾う設計（M7 で参照）。
+    /// When `true`, the tool itself reported an error. We don't turn this into
+    /// an Err: we let the agent loop continue so the model can read the message
+    /// (see M7).
     #[serde(default, rename = "isError")]
     pub is_error: bool,
 }
 
-/// MCP の content block。`text` のみ取り出し、他種は捨てる。
+/// An MCP content block. We only pick out `text`; other types are dropped.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     Text { text: String },
-    /// image / resource / 未知のタイプは情報を持たないユニットに落とす。
-    /// 取り出し側で空欄になるが、M6 段階ではテキスト用途で十分。
+    /// image / resource / unknown types are collapsed into a unitless variant.
+    /// They produce no extracted text, which is fine for the M6-era text-only flow.
     #[serde(other)]
     Other,
 }
@@ -143,12 +144,12 @@ mod tests {
 
     #[test]
     fn parses_tools_list_result() {
-        // 典型的な MCP tools/list 応答（result 部分のみ）。
+        // A typical MCP tools/list response body (the `result` portion).
         let v = serde_json::json!({
             "tools": [
                 {
                     "name": "search",
-                    "description": "検索する",
+                    "description": "Search.",
                     "inputSchema": {"type": "object", "properties": {"q": {"type": "string"}}}
                 },
                 {
@@ -160,7 +161,7 @@ mod tests {
         let r: ToolsListResult = serde_json::from_value(v).unwrap();
         assert_eq!(r.tools.len(), 2);
         assert_eq!(r.tools[0].name, "search");
-        assert_eq!(r.tools[0].description.as_deref(), Some("検索する"));
+        assert_eq!(r.tools[0].description.as_deref(), Some("Search."));
         assert!(r.tools[1].description.is_none());
     }
 
@@ -175,7 +176,7 @@ mod tests {
             "isError": false
         });
         let r: ToolsCallResult = serde_json::from_value(v).unwrap();
-        // text 2 件、image 1 件（Other に落ちる）
+        // 2 text + 1 image (Other).
         assert_eq!(r.content.len(), 3);
         let texts: Vec<&str> = r
             .content
@@ -191,7 +192,7 @@ mod tests {
 
     #[test]
     fn jsonrpc_response_parses_server_notification() {
-        // サーバ起点 notification（id 無し、method あり、result/error 無し）。
+        // A server-originated notification (no id, has method, no result/error).
         let v = serde_json::json!({
             "jsonrpc": "2.0",
             "method": "notifications/message",

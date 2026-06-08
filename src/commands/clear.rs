@@ -1,6 +1,7 @@
-// /clear — 会話履歴を消去する（SPEC §10）。
+// /clear — clear conversation history (SPEC §10).
 //
-// session.messages のみクリア。current_model や MCP 接続（M6 以降）は維持する。
+// Only `session.messages` is cleared. The current model and any MCP connections
+// (from M6) are preserved.
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -17,12 +18,12 @@ impl Command for Clear {
     }
 
     fn help(&self) -> &'static str {
-        "会話履歴を消去する（モデル選択は維持）"
+        "Clear the conversation history (model selection is preserved)"
     }
 
     async fn run(&self, _args: &str, ctx: &mut ReplContext) -> Result<Outcome> {
         ctx.session.messages.clear();
-        println!("会話履歴を消去しました");
+        println!("Conversation history cleared");
         Ok(Outcome::Continue)
     }
 }

@@ -1,10 +1,10 @@
-// context — Session / ReplContext（SPEC §11）。
+// context — Session / ReplContext (SPEC §11).
 //
-// グローバル状態を持たず、REPL ループから `&mut ReplContext` で受け渡す方針。
-// ライフタイムを構造体に持たせない（保持は `String` / 所有型のみ）。
+// No global state: the REPL loop passes `&mut ReplContext` through. Structs
+// don't carry lifetimes (everything held is owned: `String` etc.).
 //
-// `Secrets` は main.rs で `expand_secrets` を呼び出した後は不要になるため、
-// `ReplContext` には含めない。展開済みの Settings だけを保持する。
+// `Secrets` becomes irrelevant after `main.rs` calls `expand_secrets`, so it's
+// not part of `ReplContext`. We carry only the already-expanded Settings.
 
 use anyhow::{Context, Result};
 
@@ -13,9 +13,9 @@ use crate::config::Settings;
 use crate::llm::types::Message;
 use crate::mcp::McpManager;
 
-/// 会話履歴。OpenAI 互換のメッセージ列をそのまま保持する。
+/// Conversation history. An OpenAI-compatible list of messages.
 ///
-/// `/clear` で消されるのはここ（モデル選択や MCP 接続は維持される）。
+/// `/clear` resets this (the model selection and MCP connections are preserved).
 #[derive(Debug, Default)]
 pub struct Session {
     pub messages: Vec<Message>,
@@ -27,30 +27,33 @@ impl Session {
     }
 }
 
-/// REPL/コマンド/エージェントが共通に触る状態の束。
+/// Shared state that the REPL, commands, and agent all touch.
 ///
-/// 全フィールドは `&mut ReplContext` 経由で受け渡し、グローバル共有しない（SPEC §11）。
+/// Always passed by `&mut ReplContext` — never global (SPEC §11).
 pub struct ReplContext {
     pub settings: Settings,
     pub session: Session,
     pub http: reqwest::Client,
-    /// 現在使用中のモデル。`/model use` 時に `ActiveModel::resolve` で解決して
-    /// キャッシュする。config に `default_model` が無ければ None で起動。
-    /// `agent::run_turn` が None だとエラーで弾く（ターンごとの再解決は不要）。
+    /// The model currently in use. Resolved and cached at `/model use` time via
+    /// `ActiveModel::resolve`. Stays `None` if config has no `default_model`;
+    /// `agent::run_turn` returns an error in that case (no per-turn re-resolution
+    /// needed).
     pub current_model: Option<ActiveModel>,
-    /// MCP サーバ群 + 公開ツールカタログ（M6）。
-    /// 起動時の接続失敗は per-server で握りつぶし、空でも REPL は回る。
+    /// MCP servers + public tool catalog (M6).
+    /// Per-server failures at startup are absorbed; the REPL still runs even
+    /// when this is empty.
     pub mcp: McpManager,
 }
 
 impl ReplContext {
-    /// 現在の `ActiveModel` を **clone して** 返す。`agent::run_turn` で `ctx` を
-    /// `&mut` 再借用したい場面のため、`&ActiveModel` の借用を持ち続けない設計。
+    /// Return a **clone** of the current `ActiveModel`. The `agent::run_turn`
+    /// path needs to re-borrow `ctx` as `&mut` (e.g. for mcp.call), so we
+    /// avoid holding an `&ActiveModel` across that boundary.
     ///
-    /// 未選択時はユーザ向けエラーを返す（呼び出し側は `?` で素直に伝搬すれば良い）。
+    /// When unselected, return a user-facing error (callers can just `?` it).
     pub fn require_active_model(&self) -> Result<ActiveModel> {
         self.current_model.clone().context(
-            "モデルが未選択です。config の default_model か、/model use <group>:<model> で選択してください",
+            "no model selected. Set default_model in config, or use `/model use <group>:<model>`",
         )
     }
 }

@@ -1,29 +1,31 @@
-// repl/prompt — 対話的入力プリミティブ。
+// repl/prompt — interactive input primitives.
 //
-// `/config setup` 等のウィザード系コマンドで共有する。`BufRead` 抽象化により
-// 単体テストでは `Cursor` を渡せる（real stdin にも `stdin().lock()` で噛む）。
+// Shared by wizard-style commands like `/config setup`. By going through
+// `BufRead`, tests can pass a `Cursor` (real stdin is also wrapped via
+// `stdin().lock()`).
 //
-// 出力は print! / println! で stdout に直書きする：ユーザに表示するプロンプト
-// 自体は会話本流と同じ stdout が自然（tracing には流さない）。
+// Output is plain `print!` / `println!` to stdout: the prompts are part of the
+// conversational surface and belong on the same stream the user is reading
+// (not on tracing).
 //
-// 入力末尾の改行は trim 済み。EOF（read_line が 0 を返す）は Err にする — ウィザード
-// 中に stdin が閉じられた場合は処理を続行できないため。
+// Trailing newlines on input are trimmed. EOF (read_line returning 0) becomes
+// Err — there's no meaningful way to continue a wizard once stdin is closed.
 
 use std::io::{BufRead, Write};
 
 use anyhow::{bail, Context, Result};
 
-/// 1 行読んで trim する。EOF は `Err`。
+/// Read one line and trim. EOF → Err.
 pub fn read_line<R: BufRead>(r: &mut R) -> Result<String> {
     let mut buf = String::new();
-    let n = r.read_line(&mut buf).context("stdin 読み取りに失敗")?;
+    let n = r.read_line(&mut buf).context("failed to read stdin")?;
     if n == 0 {
-        bail!("stdin が閉じられました");
+        bail!("stdin closed");
     }
     Ok(buf.trim().to_string())
 }
 
-/// `  label [default]: ` 形式のプロンプトを出す。改行はしない（同じ行で入力を受ける）。
+/// Print a `  label [default]: ` prompt without a newline (reads from the same line).
 pub fn print_prompt(label: &str, default: Option<&str>) {
     match default {
         Some(d) => print!("  {label} [{d}]: "),
@@ -32,7 +34,7 @@ pub fn print_prompt(label: &str, default: Option<&str>) {
     std::io::stdout().flush().ok();
 }
 
-/// 必須入力。空文字なら再質問。
+/// Required input. Empty answer → re-ask.
 pub fn prompt_required<R: BufRead>(r: &mut R, label: &str) -> Result<String> {
     loop {
         print_prompt(label, None);
@@ -40,18 +42,18 @@ pub fn prompt_required<R: BufRead>(r: &mut R, label: &str) -> Result<String> {
         if !s.is_empty() {
             return Ok(s);
         }
-        println!("error: 空にできません");
+        println!("error: cannot be empty");
     }
 }
 
-/// 任意入力。空文字は `None`。
+/// Optional input. Empty answer → `None`.
 pub fn prompt_optional<R: BufRead>(r: &mut R, label: &str) -> Result<Option<String>> {
     print_prompt(label, None);
     let s = read_line(r)?;
     Ok(if s.is_empty() { None } else { Some(s) })
 }
 
-/// y/n プロンプト。空入力で `default` を返す。
+/// y/n prompt. Empty input picks `default`.
 pub fn prompt_bool<R: BufRead>(r: &mut R, label: &str, default: bool) -> Result<bool> {
     let hint = if default { "Y/n" } else { "y/N" };
     loop {
@@ -63,12 +65,12 @@ pub fn prompt_bool<R: BufRead>(r: &mut R, label: &str, default: bool) -> Result<
         match s.as_str() {
             "y" | "yes" => return Ok(true),
             "n" | "no" => return Ok(false),
-            _ => println!("error: y / n で答えてください"),
+            _ => println!("error: please answer y / n"),
         }
     }
 }
 
-/// 整数入力。空入力で `default` を返す。パース失敗で再質問。
+/// Integer input. Empty input picks `default`. Parse error → re-ask.
 pub fn prompt_u32<R: BufRead>(r: &mut R, label: &str, default: u32) -> Result<u32> {
     let d = default.to_string();
     loop {
@@ -79,7 +81,7 @@ pub fn prompt_u32<R: BufRead>(r: &mut R, label: &str, default: u32) -> Result<u3
         }
         match s.parse() {
             Ok(n) => return Ok(n),
-            Err(_) => println!("error: 整数で答えてください"),
+            Err(_) => println!("error: please answer with an integer"),
         }
     }
 }

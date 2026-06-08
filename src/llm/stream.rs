@@ -1,53 +1,56 @@
-// stream — `/chat/completions` の SSE パース（SPEC §6.1）。
+// stream — SSE parsing for `/chat/completions` (SPEC §6.1).
 //
-// `eventsource-stream` で `data:` 行を抜き出し、各行の JSON を逐次パースして
-// `StreamEvent` を yield する。蓄積（content 結合、tool_calls の index ごと連結）は
-// 上位（agent.rs）の責務。ここは「1 チャンク = 1 イベント」のままに留める。
+// We use `eventsource-stream` to extract `data:` lines, then parse each line's
+// JSON incrementally into a `StreamEvent`. Accumulation (concatenating content,
+// joining tool_calls per index) is the caller's responsibility (agent.rs). Here
+// we keep it as "one chunk = one event".
 //
-// SPEC §6.1 の罠を実装にも明記:
-//   - `choices[0].delta.tool_calls[i].id` と `function.name` は **先頭フラグメントのみ** に来る
-//   - `function.arguments` は **複数フラグメントに分割** されて届く
-//   蓄積側は「最初の id/name を採用、arguments は全フラグメントを連結」が正解。
+// SPEC §6.1 gotchas, called out explicitly in the implementation:
+//   - `choices[0].delta.tool_calls[i].id` and `function.name` arrive **only in
+//     the first fragment**
+//   - `function.arguments` is **fragmented across multiple chunks**
+//   The accumulator must "take the first id/name, concatenate every arguments fragment."
 
 use anyhow::{anyhow, Result};
 use eventsource_stream::Eventsource;
 use futures_util::{Stream, StreamExt};
 use serde::Deserialize;
 
-/// SSE 1 件分のチャンク。
+/// One SSE chunk.
 ///
-/// `[DONE]` 受信時はストリームを即終了（`None`）するため、`Done` バリアントは持たない。
-/// 呼び出し側は Stream の自然終了（`next()` が `None` を返す）でループを終わらせる。
+/// When `[DONE]` arrives, we end the stream immediately (returning `None`);
+/// hence no separate `Done` variant. Callers terminate via the stream's natural
+/// end (`next()` returns `None`).
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     Chunk(ChunkPayload),
 }
 
-/// 1 チャンクから取り出した有意なデルタ。空チャンクは `parse_stream` 内でスキップ。
+/// The meaningful delta extracted from one chunk. Empty chunks are skipped inside `parse_stream`.
 #[derive(Debug, Clone, Default)]
 pub struct ChunkPayload {
     pub content: Option<String>,
     pub tool_calls: Vec<ToolCallDelta>,
 }
 
-/// `choices[0].delta.tool_calls[i]` 1 件。`index` で蓄積バケットを引く。
+/// One `choices[0].delta.tool_calls[i]`. `index` selects the accumulator bucket.
 #[derive(Debug, Clone)]
 pub struct ToolCallDelta {
     pub index: usize,
     pub id: Option<String>,
     pub name: Option<String>,
-    /// `function.arguments` の断片（JSON 文字列の途中で切れている）。
+    /// A fragment of `function.arguments` (the JSON string may be cut mid-character).
     pub arguments_fragment: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
-// バイトストリーム → StreamEvent ストリーム
+// Byte stream → StreamEvent stream
 // ---------------------------------------------------------------------------
 
-/// `reqwest::Response` を消費し、SSE をパースして `StreamEvent` を流す。
+/// Consume a `reqwest::Response`, SSE-parse it, and yield `StreamEvent`s.
 ///
-/// `[DONE]` 受信時は即座に `None` を返してストリームを終了する。`es` が drop されるため
-/// HTTP 接続も同時に解放される。呼び出し側は `while let Some(...)` でループするだけでよい。
+/// `[DONE]` returns `None` immediately so the stream ends — dropping `es` also
+/// releases the underlying HTTP connection. Callers just `while let Some(...)`.
 pub fn parse_stream(resp: reqwest::Response) -> impl Stream<Item = Result<StreamEvent>> {
     let es = resp.bytes_stream().eventsource();
     futures_util::stream::unfold(Some(es), |state| async move {
@@ -56,19 +59,19 @@ pub fn parse_stream(resp: reqwest::Response) -> impl Stream<Item = Result<Stream
             match es.next().await {
                 None => return None,
                 Some(Err(e)) => {
-                    return Some((Err(anyhow!("SSE 受信エラー: {e}")), Some(es)));
+                    return Some((Err(anyhow!("SSE receive error: {e}")), Some(es)));
                 }
                 Some(Ok(event)) => {
-                    // SSE の event-type 行は使わない（OpenAI 互換は `data:` のみ送る）。
+                    // The SSE `event:` line is unused (openai-compatible sends `data:` only).
                     if event.data == "[DONE]" {
-                        // es を drop → HTTP 接続を解放。Stream を自然終了させる。
+                        // Drop es → release HTTP connection. End the stream naturally.
                         return None;
                     }
                     if event.data.is_empty() {
                         continue;
                     }
                     match parse_chunk(&event.data) {
-                        Ok(None) => continue, // finish_reason のみ等の空チャンク
+                        Ok(None) => continue, // Empty chunk (e.g. finish_reason only)
                         Ok(Some(payload)) => {
                             return Some((Ok(StreamEvent::Chunk(payload)), Some(es)));
                         }
@@ -83,7 +86,7 @@ pub fn parse_stream(resp: reqwest::Response) -> impl Stream<Item = Result<Stream
 }
 
 // ---------------------------------------------------------------------------
-// JSON チャンクの構造
+// JSON chunk shape
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
@@ -96,7 +99,7 @@ struct RawChunk {
 struct RawChoice {
     #[serde(default)]
     delta: RawDelta,
-    // finish_reason 等は今は使わない（蓄積は上位で done で確定する）。
+    // finish_reason etc. is unused (done is signaled by stream end above).
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -109,7 +112,7 @@ struct RawDelta {
 
 #[derive(Debug, Deserialize)]
 struct RawToolCall {
-    /// SPEC §6.1: 同じツール呼び出しのフラグメントは同じ index を持つ。
+    /// SPEC §6.1: fragments of the same tool call share the same index.
     index: usize,
     #[serde(default)]
     id: Option<String>,
@@ -127,7 +130,7 @@ struct RawFunction {
 
 fn parse_chunk(data: &str) -> Result<Option<ChunkPayload>> {
     let raw: RawChunk = serde_json::from_str(data)
-        .map_err(|e| anyhow!("chunk JSON パース失敗: {e}; data={data}"))?;
+        .map_err(|e| anyhow!("failed to parse chunk JSON: {e}; data={data}"))?;
     let Some(choice) = raw.choices.into_iter().next() else {
         return Ok(None);
     };
@@ -161,7 +164,7 @@ fn parse_chunk(data: &str) -> Result<Option<ChunkPayload>> {
 }
 
 // ---------------------------------------------------------------------------
-// 単体テスト — JSON パーサ部分のみ
+// Unit tests — JSON parser only
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -178,21 +181,21 @@ mod tests {
 
     #[test]
     fn empty_delta_chunk_returns_none() {
-        // finish_reason だけが届く最終チャンク等。Yield 対象外。
+        // The "finish_reason only" final chunk etc. Not yielded.
         let data = r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#;
         assert!(parse_chunk(data).unwrap().is_none());
     }
 
     #[test]
     fn no_choices_returns_none() {
-        // ストリーム開始時の usage チャンク等、choices が空でもパニックしない。
+        // Startup `usage` chunks etc. — empty `choices` mustn't panic.
         let data = r#"{"choices":[]}"#;
         assert!(parse_chunk(data).unwrap().is_none());
     }
 
     #[test]
     fn parses_tool_call_head_fragment() {
-        // SPEC §6.1: 先頭フラグメントには id + name、arguments は空文字 or 部分のみ。
+        // SPEC §6.1: the head fragment carries id + name; arguments is empty or partial.
         let data = r#"{"choices":[{"delta":{"tool_calls":[
             {"index":0,"id":"call_1","function":{"name":"do_it","arguments":""}}
         ]}}]}"#;
@@ -207,7 +210,7 @@ mod tests {
 
     #[test]
     fn parses_tool_call_arguments_continuation() {
-        // 継続フラグメントは id/name なし、arguments のみ。
+        // Continuation fragments have no id/name, only arguments.
         let data = r#"{"choices":[{"delta":{"tool_calls":[
             {"index":0,"function":{"arguments":"{\"x\":"}}
         ]}}]}"#;

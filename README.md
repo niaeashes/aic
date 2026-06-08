@@ -1,45 +1,47 @@
 # aic
 
-OpenAI 互換 `/chat/completions` と MCP（Model Context Protocol, Streamable HTTP）で
-動作する、最小構成の対話型 CLI チャットツール。Rust 製、ストリーミング表示専用。
+A minimal interactive chat CLI for OpenAI-compatible `/chat/completions` endpoints
+with MCP (Model Context Protocol, Streamable HTTP) tool calling. Written in Rust,
+streaming-only display.
 
-- **provider 抽象化なし** — openai-compatible エンドポイントだけを直叩きする
-- **MCP は Streamable HTTP のみ** — stdio やソケット系のトランスポートは無し
-- **secrets は macOS Keychain + ChaCha20-Poly1305** — `env.json` 平文をコミット禁止
+- **No provider abstraction** — talks directly to openai-compatible endpoints
+- **MCP is Streamable HTTP only** — no stdio or socket transports
+- **secrets via macOS Keychain + ChaCha20-Poly1305** — plaintext `env.json` must never be committed
 
-詳細仕様は [SPEC.md](SPEC.md)、マイルストーン分解は [MILESTONES.md](MILESTONES.md)。
+See [SPEC.md](SPEC.md) for the full specification and [MILESTONES.md](MILESTONES.md)
+for the milestone breakdown.
 
 ---
 
-## 5 分でチャットを返すまで
+## From zero to first chat in 5 minutes
 
-### 1. ビルド
+### 1. Build
 
 ```sh
 cargo build --release
-# バイナリは target/release/aic
+# Binary is at target/release/aic
 ```
 
-### 2. 最小設定
+### 2. Minimal config
 
-初回は対話的なウィザードが便利:
+For first-time setup, the interactive wizard is the easy path:
 
 ```sh
 aic
 aic> /config setup
 ```
 
-聞かれる順番:
+You will be asked, in order:
 
-1. **model group**（group 名 / `base_url` / `api_key`（`${VAR}` 推奨）/ models）
-2. **default_model** を一覧から番号で選択
-3. （任意）MCP サーバ（name / url / Authorization ヘッダ）
+1. **model group** (group name / `base_url` / `api_key` (`${VAR}` recommended) / models)
+2. **default_model**, picked by number from the list
+3. (optional) MCP server (name / url / Authorization header)
 4. `ui.max_tool_iterations`
 
-書き出し先は `~/.config/aic/config.yaml`（`AIC_CONFIG_DIR` 環境変数か
-`--config <path>` で上書き可能）。
+The file is written to `~/.config/aic/config.yaml` (override with the
+`AIC_CONFIG_DIR` env var or `--config <path>`).
 
-ウィザードを使わず手書きする場合のサンプル:
+If you'd rather hand-edit instead of running the wizard:
 
 ```yaml
 # ~/.config/aic/config.yaml
@@ -55,7 +57,7 @@ model_groups:
 
   - name: local
     base_url: http://127.0.0.1:11434/v1
-    # ollama は認証不要なので api_key は省略
+    # ollama needs no auth, so api_key is omitted
     models:
       - qwen2.5-coder:32b
 
@@ -72,11 +74,11 @@ ui:
   max_tool_iterations: 10
 ```
 
-`${VAR}` プレースホルダの解決順は **secrets マップ → プロセス環境変数**。
+`${VAR}` placeholders are resolved in order: **secrets map → process environment variables**.
 
-### 3. secrets
+### 3. Secrets
 
-`~/.config/aic/env.json` を作って、`${VAR}` で参照しているキーをここに書く:
+Create `~/.config/aic/env.json` and put the keys you reference via `${VAR}`:
 
 ```json
 {
@@ -85,124 +87,134 @@ ui:
 }
 ```
 
-この平文 `env.json` は **絶対にコミットしない**。`.gitignore` 済みだが念のため。
+**Never commit the plaintext `env.json`.** It is already in `.gitignore`, but
+double-check before pushing.
 
-macOS であれば、`aic env seal` で `env.json.enc` に封印し、平文を削除できる:
+On macOS you can seal it into `env.json.enc` and then delete the plaintext:
 
 ```sh
 aic env seal
-# -> ~/.config/aic/env.json.enc を生成
-# -> 32-byte ChaCha20-Poly1305 鍵を macOS Keychain (service=aic, account=env-key) に保存
+# -> generates ~/.config/aic/env.json.enc
+# -> stores a 32-byte ChaCha20-Poly1305 key in macOS Keychain (service=aic, account=env-key)
 rm ~/.config/aic/env.json
 ```
 
-次回起動時は `env.json.enc` を Keychain 鍵で復号して使う。鍵を別マシンに持ち運べば
-封印された `env.json.enc` だけコミットしておくことも可能。編集したい場合は
-`aic env unseal` で平文を取り出す。
+On subsequent startup, `env.json.enc` is decrypted with the Keychain key. If you
+carry the key to another machine you can commit the sealed `env.json.enc` alone.
+To edit, run `aic env unseal` to extract the plaintext back.
 
-非 macOS（Linux 等）では `env.json` 平文 → 環境変数の順でフォールバック。
-Keychain サポートは macOS のみ。
+On non-macOS platforms (Linux etc.) the fallback chain is: `env.json` plaintext →
+process environment variables. Keychain support is macOS-only.
 
-### 4. チャット開始
+### 4. Start chatting
 
 ```sh
 aic
-aic> こんにちは
-assistant> こんにちは。何かお手伝いできることはありますか？
+aic> Hello
+assistant> Hi! How can I help you today?
 aic> /exit
 ```
 
-MCP サーバを設定していれば、ツール呼び出しも自動でルートされる:
+If you have MCP servers configured, tool calls are routed automatically:
 
 ```
-aic> 今日の天気を教えて
+aic> What's the weather today?
 · tool call: tools__get_weather({"location":"Tokyo"})
 ✓ tool ok:   tools__get_weather
-assistant> 東京の天気は……
+assistant> The weather in Tokyo is...
 ```
 
 ---
 
-## REPL コマンド
+## REPL commands
 
-| コマンド | 説明 |
+| Command | Description |
 |---|---|
-| `/help` | 登録済みコマンドの一覧 |
-| `/exit` | 終了（Ctrl-D でも可） |
-| `/clear` | 会話履歴をリセット（モデル選択 / MCP 接続は維持） |
-| `/model` | 設定済みグループ／モデル一覧。現在のモデルに `*` |
-| `/model use <group>:<model>` | モデル切り替え（例: `/model use local:qwen2.5-coder:32b`） |
-| `/config show` | 現在の Settings を YAML 表示（api_key / headers はマスク） |
-| `/config setup` | 対話的にホーム `config.yaml` を生成 |
+| `/help` | List all registered commands |
+| `/exit` | Quit (Ctrl-D also works) |
+| `/clear` | Reset conversation history (keeps model selection / MCP connections) |
+| `/model` | List configured groups/models. Current model marked with `*` |
+| `/model use <group>:<model>` | Switch model (e.g. `/model use local:qwen2.5-coder:32b`) |
+| `/config show` | Show current Settings as YAML (api_key / headers redacted) |
+| `/config setup` | Interactively generate the home `config.yaml` |
 
 ---
 
 ## CLI
 
 ```sh
-aic                       # REPL 起動
-aic --config <path>       # 明示的に config.yaml のパス指定
-aic env seal              # env.json -> env.json.enc（macOS）
-aic env unseal            # env.json.enc -> env.json（macOS）
+aic                       # Start the REPL
+aic --config <path>       # Explicit path to config.yaml
+aic env seal              # env.json -> env.json.enc (macOS)
+aic env unseal            # env.json.enc -> env.json (macOS)
 ```
 
-### 環境変数
+### Environment variables
 
-- `RUST_LOG` — `tracing` のフィルタ。詳細ログを出すには `RUST_LOG=aic=debug aic`
-- `AIC_CONFIG_DIR` — `~/.config/aic` の代わりに使うディレクトリ
-- `HOME` — 既定の config ディレクトリ解決に使用
+- `RUST_LOG` — `tracing` filter. For verbose logs: `RUST_LOG=aic=debug aic`
+- `AIC_CONFIG_DIR` — Directory to use instead of `~/.config/aic`
+- `HOME` — Used to resolve the default config directory
 
 ---
 
-## ファイル配置
+## File layout
 
-| パス | 役割 |
+| Path | Purpose |
 |---|---|
-| `~/.config/aic/config.yaml` | ホーム設定（既定） |
-| `~/.config/aic/env.json` | 平文 secrets。**コミット禁止** |
-| `~/.config/aic/env.json.enc` | 封印済み secrets。コミット可 |
-| `~/.config/aic/history.txt` | rustyline の入力履歴 |
-| `./aic.yaml` | 起動ディレクトリ側の上書き設定（トップレベル浅マージ） |
+| `~/.config/aic/config.yaml` | Home config (default) |
+| `~/.config/aic/env.json` | Plaintext secrets. **Must not be committed** |
+| `~/.config/aic/env.json.enc` | Sealed secrets. Commit-safe |
+| `~/.config/aic/history.txt` | rustyline input history |
+| `./aic.yaml` | Project-level override (top-level shallow merge) |
 
-`aic.yaml`（プロジェクト側）はホーム設定にトップレベルキー単位で **完全置換** で
-重ねる（要素単位のマージはしない）。
+The project-level `aic.yaml` overlays the home config with **complete top-level
+key replacement** (no element-wise merging within a key).
 
 ---
 
-## 内部構造
+## Internal layout
 
 ```
 src/
-├── main.rs          起動・clap・tracing 初期化
-├── agent.rs         1 ターンの chat ループ（assistant ↔ tool 再投入）
-├── repl/            rustyline ループ・dispatch
-├── commands/        /exit /clear /help /model /config（inventory 自動収集）
-├── config/          Settings 型・YAML ロード・${VAR} 展開・secrets / Keychain
-├── llm/             ChatRequest / SSE パーサ / ChatClient
-└── mcp/             JSON-RPC・Streamable HTTP transport・ツールカタログ
+├── main.rs          Entry point: clap, tracing init
+├── agent.rs         One-turn chat loop (assistant ↔ tool re-feed)
+├── repl/            rustyline loop, dispatch
+├── commands/        /exit /clear /help /model /config (auto-collected via inventory)
+├── config/          Settings types, YAML loading, ${VAR} expansion, secrets / Keychain
+├── llm/             ChatRequest, SSE parser, ChatClient
+└── mcp/             JSON-RPC, Streamable HTTP transport, tool catalog
 ```
 
-新コマンドの追加は `src/commands/<name>.rs` を置き、`commands/mod.rs` に `mod`
-行を 1 つ足すだけ。ディスパッチ／ヘルプ／登録ロジックには触らない（SPEC §9.3）。
+To add a new command, drop a file at `src/commands/<name>.rs` and add a single
+`mod` line in `commands/mod.rs`. Dispatch / help / registration logic stays
+untouched (SPEC §9.3).
 
 ---
 
-## インストール
+## Installation
 
 ```sh
 cargo install --git https://github.com/niaeashes/aic
 ```
 
-利用者の `~/.cargo/bin/aic` に入る。Rust toolchain（rustc 1.70+）が必要。
-macOS Keychain を使うので、現状 macOS 以外は `aic env seal/unseal` が動かない
-（チャットと MCP は動く — 平文 `env.json` または環境変数で `${VAR}` を解決すれば良い）。
+Installs to `~/.cargo/bin/aic`. Requires a Rust toolchain (rustc 1.70+).
+Because it uses macOS Keychain, `aic env seal/unseal` only works on macOS today.
+Chat and MCP work on any platform — resolve `${VAR}` via plaintext `env.json` or
+environment variables.
 
-アップデート:
+If `~/.cargo/bin` is not on your `PATH` yet (i.e. you didn't install Rust via
+rustup), add it manually:
+
+```sh
+export PATH="$HOME/.cargo/bin:$PATH"
+```
+
+Updating:
 
 ```sh
 cargo install --git https://github.com/niaeashes/aic --force
 ```
 
-## ライセンス
+## License
 
-MIT License — 詳細は [LICENSE](LICENSE) を参照。
+MIT License — see [LICENSE](LICENSE).

@@ -1,23 +1,24 @@
-// secrets — `${VAR}` 解決 + env.json / env.json.enc の取り扱い（SPEC §5）。
+// secrets — ${VAR} resolution + env.json / env.json.enc handling (SPEC §5).
 //
-// 解決順は SPEC §5 の通り「secrets マップ → プロセス環境変数」。
-// secrets マップは起動時に以下のフォールバックチェーンで構築する:
+// Resolution order follows SPEC §5: secrets map → process environment variables.
+// The secrets map is built at startup via this fallback chain:
 //
-//   1. (macOS のみ) `<config_dir>/env.json.enc` を Keychain 鍵で復号
-//   2. `<config_dir>/env.json`（平文、ローカル編集用）
-//   3. 環境変数のみ
+//   1. (macOS only) decrypt `<config_dir>/env.json.enc` with the Keychain key
+//   2. `<config_dir>/env.json` (plaintext, for local editing)
+//   3. Environment variables only
 //
-// 各段で失敗しても警告にとどめて次のフォールバックへ。起動を止めない（SPEC §5.2 末尾）。
+// A failure at any stage emits a warning and falls through to the next — startup
+// never blocks (SPEC §5.2 end).
 //
-// サブモジュール構成（M9 でリファクタ）:
-//   crypto.rs    — ChaCha20-Poly1305 AEAD（純関数）
-//   keychain.rs  — macOS Keychain 鍵管理（非 macOS は実行時 bail）
-//   storage.rs   — env.json / env.json.enc のファイル I/O
-//   cli.rs       — `aic env seal/unseal` の本体（main.rs から呼ぶ）
+// Sub-module layout (introduced when secrets.rs was split):
+//   crypto.rs    — ChaCha20-Poly1305 AEAD (pure functions)
+//   keychain.rs  — macOS Keychain key management (non-macOS bails at runtime)
+//   storage.rs   — env.json / env.json.enc file I/O
+//   cli.rs       — `aic env seal/unseal` body (called by main.rs)
 //
-// 公開境界は `Secrets` 型 + `seal` / `unseal` の 3 シンボルのみ。
-// cli の `seal` / `unseal` は `pub use` で再公開し、外部 import パスを
-// `crate::config::secrets::{Secrets, seal, unseal}` のまま保つ。
+// Public surface is the `Secrets` type plus `seal` / `unseal` — three symbols.
+// We re-export `seal` / `unseal` via `pub use` so the external path stays
+// `crate::config::secrets::{Secrets, seal, unseal}`.
 
 mod cli;
 mod crypto;
@@ -29,35 +30,36 @@ pub use cli::{seal, unseal};
 use std::collections::HashMap;
 use std::path::Path;
 
-// サブモジュールから参照される定数。`Secrets::load` で `config_dir.join(...)` するため
-// mod.rs に置く。cli.rs からは `super::{ENV_JSON, ENV_JSON_ENC}` で引く。
+// Constants shared by sub-modules. `Secrets::load` uses these via
+// `config_dir.join(...)`, so they live in mod.rs. cli.rs pulls them via
+// `super::{ENV_JSON, ENV_JSON_ENC}`.
 pub(super) const ENV_JSON: &str = "env.json";
 pub(super) const ENV_JSON_ENC: &str = "env.json.enc";
 
-/// `${VAR}` 解決の単一窓口。
+/// Single entry point for `${VAR}` resolution.
 ///
-/// 解決順は SPEC §5 の通り「secrets マップ → プロセス環境変数」。
+/// Resolution order is SPEC §5: secrets map → process environment variables.
 #[derive(Debug, Clone, Default)]
 pub struct Secrets {
     map: HashMap<String, String>,
 }
 
 impl Secrets {
-    /// 環境変数だけを参照する空 Secrets。テストや非常用フォールバック。
+    /// Empty `Secrets` that consults only the environment. For tests and emergency fallback.
     #[allow(dead_code)]
     pub fn from_env_only() -> Self {
         Self::default()
     }
 
-    /// 起動時のロード経路。`config_dir` から env.json(.enc) を解決する。
+    /// Startup load path. Reads env.json(.enc) from `config_dir`.
     ///
-    /// どの段階の失敗も `eprintln!` で警告にとどめて次のフォールバックへ。
-    /// 戻り値の `Secrets` は最終的に環境変数フォールバックを必ず持つので、
-    /// 呼び出し側は失敗を意識する必要が無い（SPEC §5.2 末尾）。
+    /// Any stage's failure emits an `eprintln!` warning and proceeds to the next
+    /// fallback. The returned `Secrets` always has environment-variable fallback,
+    /// so the caller doesn't need to worry about partial failures (SPEC §5.2 end).
     ///
-    /// 非 macOS で `env.json.enc` が存在する場合、`storage::decrypt_env_file` 内の
-    /// `keychain::load_key()` が即 bail する。そのエラーがフォールバック警告に
-    /// 含まれて出力されるため、ここに cfg gate は不要。
+    /// On non-macOS when `env.json.enc` exists, `storage::decrypt_env_file` will
+    /// bail inside `keychain::load_key()`. That error string is included in the
+    /// fallback warning, so we don't need a cfg gate here.
     pub fn load(config_dir: &Path) -> Self {
         let enc_path = config_dir.join(ENV_JSON_ENC);
         let plain_path = config_dir.join(ENV_JSON);
@@ -67,7 +69,7 @@ impl Secrets {
                 Ok(map) => return Self { map },
                 Err(e) => {
                     eprintln!(
-                        "warning: {} の復号に失敗（{e:#}）。env.json / 環境変数にフォールバックします。",
+                        "warning: failed to decrypt {} ({e:#}). Falling back to env.json / environment variables.",
                         enc_path.display()
                     );
                 }
@@ -79,7 +81,7 @@ impl Secrets {
                 Ok(map) => return Self { map },
                 Err(e) => {
                     eprintln!(
-                        "warning: {} の読み込みに失敗（{e:#}）。環境変数のみで起動します。",
+                        "warning: failed to read {} ({e:#}). Starting with environment variables only.",
                         plain_path.display()
                     );
                 }
@@ -88,7 +90,7 @@ impl Secrets {
         Self::default()
     }
 
-    /// `${VAR}` 1 個分のキー解決。secrets マップ優先、環境変数フォールバック。
+    /// Resolve one `${VAR}` key. Secrets map first, environment variables as fallback.
     pub fn get(&self, key: &str) -> Option<String> {
         self.map
             .get(key)
@@ -96,10 +98,11 @@ impl Secrets {
             .or_else(|| std::env::var(key).ok())
     }
 
-    /// 文字列中の `${VAR}` を全部展開。未解決のものはそのまま残す
-    /// （config がプレースホルダのまま動くと API 呼び出し時に分かりやすく死ぬ方が良い）。
+    /// Expand every `${VAR}` in the input. Unresolved placeholders are left as-is
+    /// (it's better for the config to fail loudly at API-call time than to silently
+    /// substitute an empty string).
     ///
-    /// `$$` でリテラル `$` をエスケープする。`$` 単独や `${` の不一致はそのまま残す。
+    /// `$$` is the literal-`$` escape. Bare `$` and unmatched `${` are passed through.
     pub fn expand(&self, input: &str) -> String {
         let mut out = String::with_capacity(input.len());
         let mut chars = input.char_indices().peekable();
@@ -110,7 +113,7 @@ impl Secrets {
             }
             match chars.peek().map(|&(_, ch)| ch) {
                 Some('$') => {
-                    // $$ → $（リテラルエスケープ）
+                    // $$ → $ (literal escape)
                     chars.next();
                     out.push('$');
                 }
@@ -127,7 +130,7 @@ impl Secrets {
                         name.push(ch);
                     }
                     if !closed {
-                        // `${...` で閉じていない → そのまま戻す
+                        // `${...` never closed — emit it verbatim.
                         out.push('$');
                         out.push('{');
                         out.push_str(&name);
@@ -136,7 +139,7 @@ impl Secrets {
                     match self.get(&name) {
                         Some(v) => out.push_str(&v),
                         None => {
-                            // 未解決はプレースホルダのまま残す
+                            // Leave the placeholder visible when unresolved.
                             out.push_str("${");
                             out.push_str(&name);
                             out.push('}');
@@ -164,7 +167,7 @@ mod tests {
     #[test]
     fn expand_keeps_unknown_placeholder() {
         let s = Secrets::default();
-        // 環境変数にも無い前提のキー名
+        // A key we assume is also absent from the environment.
         assert_eq!(
             s.expand("x=${__AIC_TEST_DEFINITELY_UNSET}"),
             "x=${__AIC_TEST_DEFINITELY_UNSET}"
@@ -186,7 +189,8 @@ mod tests {
     #[test]
     fn map_takes_priority_over_env() {
         let mut s = Secrets::default();
-        // 環境変数を実際にいじると並行テストで不安定になるため、map のみ検証
+        // Real env var manipulation would be racy in parallel tests, so we only
+        // check the map path.
         s.map.insert("HOME".into(), "from-map".into());
         assert_eq!(s.expand("${HOME}"), "from-map");
     }

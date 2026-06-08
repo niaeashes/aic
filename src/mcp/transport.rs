@@ -1,16 +1,18 @@
-// transport — MCP Streamable HTTP（SPEC §7.1, §7.2, §7.3）。
+// transport — MCP Streamable HTTP (SPEC §7.1, §7.2, §7.3).
 //
-// 1 つの POST エンドポイントに対し、Content-Type で 2 種類の応答を区別する:
-//   - `application/json`     … JSON-RPC レスポンスを 1 件丸ごと返す
-//   - `text/event-stream`    … SSE フレームで 1 件以上の JSON-RPC メッセージを流す
+// One POST endpoint serves two response shapes, distinguished by Content-Type:
+//   - `application/json`     … one JSON-RPC response in one body
+//   - `text/event-stream`    … SSE frames carrying one or more JSON-RPC messages
 //
-// クライアントは常に `Accept: application/json, text/event-stream` を送る。
-// `Mcp-Session-Id` はサーバが initialize 応答ヘッダで返した値を以降の全リクエストで
-// echo back する（SPEC §7.3）。`MCP-Protocol-Version` も毎回付ける。
+// The client always sends `Accept: application/json, text/event-stream`.
+// `Mcp-Session-Id`, if the server returned one in the initialize response, is
+// echoed back on every subsequent request (SPEC §7.3). `MCP-Protocol-Version`
+// is sent on every request.
 //
-// SSE パーサは「`data:` 行抽出 → 各メッセージごとに `serde_json` で JSON-RPC へ」と
-// いう薄い実装で済ませる（M2 の LLM SSE と違い、`eventsource-stream` を持ち込まなく
-// てもよい — MCP の応答は 1 ロード分を読み切ってから処理する単発系が中心）。
+// The SSE parser is intentionally minimal — "extract `data:` lines → parse each
+// message via serde_json into JSON-RPC" — because MCP responses are mostly
+// single-roundtrip and we can read the whole body first (unlike M2 LLM SSE, no
+// `eventsource-stream` needed here).
 
 use std::collections::BTreeMap;
 
@@ -21,17 +23,17 @@ use serde_json::{json, Value};
 
 use crate::mcp::protocol::{JsonRpcResponse, PROTOCOL_VERSION};
 
-/// 1 つの MCP サーバ向け接続状態。
+/// One MCP server's transport state.
 ///
-/// `session_id` と `next_id` を変えるので `&mut self` で受ける。アプリ全体としては
-/// `ReplContext` 経由で配線するため、グローバル共有状態にはならない（SPEC §11）。
+/// `session_id` and `next_id` mutate, hence `&mut self`. At the app level
+/// the transport is wired through `ReplContext`, never as a global (SPEC §11).
 pub struct Transport {
     pub url: String,
     pub headers: BTreeMap<String, String>,
     http: reqwest::Client,
-    /// initialize 応答で `Mcp-Session-Id` が返った場合の値（以降のリクエストで echo back）。
+    /// Value of `Mcp-Session-Id` from the initialize response (echoed on later requests).
     session_id: Option<String>,
-    /// 単調増加 JSON-RPC リクエスト ID。
+    /// Monotonically increasing JSON-RPC request id.
     next_id: i64,
 }
 
@@ -46,7 +48,8 @@ impl Transport {
         }
     }
 
-    /// デバッグ用にセッション ID を覗ける（テストや /config show の将来拡張で使う想定）。
+    /// Debugging hook — peek at the session id (used by tests and a future
+    /// `/config show` extension).
     #[allow(dead_code)]
     pub fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
@@ -58,11 +61,11 @@ impl Transport {
     }
 
     // -----------------------------------------------------------------------
-    // パブリック RPC API
+    // Public RPC API
     // -----------------------------------------------------------------------
 
-    /// 通常の request/response。`result` を生 `Value` で返す。
-    /// JSON-RPC error はここで `bail!` し、サーバ側通知のフレームは読み飛ばす。
+    /// Standard request/response. Returns the raw `result` as `Value`.
+    /// JSON-RPC errors `bail!` here; server-originated notification frames are skipped.
     pub async fn request<P: Serialize>(&mut self, method: &str, params: P) -> Result<Value> {
         let id = self.next_id();
         let body = json!({
@@ -73,48 +76,49 @@ impl Transport {
         });
         let (status, ct, text) = self.post_raw(&body).await?;
         if status == reqwest::StatusCode::ACCEPTED {
-            // 通常の request に 202 が返ってくることは仕様上想定外。
-            bail!("MCP {method}: 応答に 202 が返ったが、body が無い");
+            // 202 on a regular request is not expected per spec.
+            bail!("MCP {method}: got 202 but no body");
         }
         let resp = parse_response_payload(&ct, &text)
-            .with_context(|| format!("MCP {method} 応答のパースに失敗"))?;
+            .with_context(|| format!("failed to parse MCP {method} response"))?;
         if let Some(e) = resp.error {
             bail!("MCP {method} error {}: {}", e.code, e.message);
         }
         resp.result
-            .ok_or_else(|| anyhow!("MCP {method}: result も error も無いフレーム"))
+            .ok_or_else(|| anyhow!("MCP {method}: frame has neither result nor error"))
     }
 
-    /// 通知（id 無し、応答不要）。HTTP 上は 200/202 のどちらでも成功扱い。
+    /// Notification (no id, no response expected). HTTP 200/202 both count as success.
     pub async fn notify<P: Serialize>(&mut self, method: &str, params: P) -> Result<()> {
         let body = json!({
             "jsonrpc": "2.0",
             "method": method,
             "params": params,
         });
-        // 通知では body の有無を問わずレスポンス内容は捨てる（サーバ起点 notification が
-        // 混ざる可能性があるが、MVP では拾わない）。
+        // For notifications we discard the response body either way (any
+        // server-originated notification mixed in is ignored at the MVP).
         self.post_raw(&body).await.map(|_| ())
     }
 
     // -----------------------------------------------------------------------
-    // 内部: POST + ヘッダ管理
+    // Internal: POST + header management
     // -----------------------------------------------------------------------
 
-    /// POST 1 発、(status, content-type, body) を返す。
-    /// `Mcp-Session-Id` がレスポンスヘッダに付いていれば自身に保存する。
+    /// Single POST. Returns (status, content-type, body).
+    /// If `Mcp-Session-Id` appears in the response headers, we cache it.
     async fn post_raw(&mut self, body: &Value) -> Result<(reqwest::StatusCode, String, String)> {
         let mut req = self
             .http
             .post(&self.url)
-            // 両方の MIME を受け入れる宣言（SPEC §7.2）
+            // Accept both MIME types (SPEC §7.2).
             .header(ACCEPT, "application/json, text/event-stream")
             .header("MCP-Protocol-Version", PROTOCOL_VERSION)
             .json(body);
         if let Some(sid) = &self.session_id {
             req = req.header("Mcp-Session-Id", sid);
         }
-        // ユーザ設定ヘッダ（${VAR} は起動時展開済み）。同名キーがあればこちらで上書き。
+        // User-configured headers (`${VAR}` already expanded at startup). If a
+        // collision happens these win.
         for (k, v) in &self.headers {
             req = req.header(k, v);
         }
@@ -122,9 +126,9 @@ impl Transport {
         let resp = req
             .send()
             .await
-            .with_context(|| format!("MCP POST 失敗: {}", self.url))?;
+            .with_context(|| format!("MCP POST failed: {}", self.url))?;
         let status = resp.status();
-        // セッション ID 取得（無ければそのまま）。
+        // Pick up Mcp-Session-Id if present (no-op if absent).
         if let Some(v) = resp
             .headers()
             .get("Mcp-Session-Id")
@@ -146,41 +150,41 @@ impl Transport {
         let text = resp
             .text()
             .await
-            .with_context(|| "MCP レスポンス本文の読み取り失敗")?;
+            .with_context(|| "failed to read MCP response body")?;
         Ok((status, ct, text))
     }
 }
 
 // ---------------------------------------------------------------------------
-// 応答パース — Content-Type 分岐とテストフック
+// Response parsing — Content-Type branching, test hook
 // ---------------------------------------------------------------------------
 
-/// Content-Type を見て JSON 単発 / SSE のどちらかでパースし、
-/// `result` か `error` を持つ最初のフレームを返す。
-/// 通信副作用が無いので単体テストから直接叩ける。
+/// Branch on Content-Type and parse the body as either a single JSON-RPC
+/// response or an SSE stream. Returns the first frame that carries `result`
+/// or `error`. Has no IO side effects, so it's unit-testable.
 pub fn parse_response_payload(content_type: &str, body: &str) -> Result<JsonRpcResponse> {
     if body.is_empty() {
-        bail!("レスポンス本文が空");
+        bail!("empty response body");
     }
     if content_type.contains("text/event-stream") {
         parse_sse_jsonrpc(body)
     } else {
-        // application/json または不明（最後の砦として単発 JSON 扱い）
+        // application/json or unknown (last-resort: treat as a single JSON).
         let resp: JsonRpcResponse = serde_json::from_str(body)
-            .with_context(|| format!("JSON-RPC 単発パース失敗: {body}"))?;
+            .with_context(|| format!("failed to parse JSON-RPC single-shot: {body}"))?;
         Ok(resp)
     }
 }
 
-/// SSE 本文から最初の `result` または `error` を持つメッセージを返す。
-/// サーバ起点 notification（id 無し、method あり）はスキップする。
+/// From an SSE body, return the first message carrying `result` or `error`.
+/// Server-originated notifications (no id, has method) are skipped.
 pub fn parse_sse_jsonrpc(text: &str) -> Result<JsonRpcResponse> {
     for msg in extract_sse_data(text) {
         let resp: JsonRpcResponse = match serde_json::from_str(&msg) {
             Ok(r) => r,
             Err(e) => {
-                // 1 フレーム壊れていても他フレームで救えるよう続行
-                eprintln!("warning: MCP SSE フレームのパースに失敗: {e}（スキップ）");
+                // One broken frame shouldn't prevent picking up a later valid frame.
+                eprintln!("warning: failed to parse MCP SSE frame: {e} (skipping)");
                 continue;
             }
         };
@@ -188,19 +192,20 @@ pub fn parse_sse_jsonrpc(text: &str) -> Result<JsonRpcResponse> {
             return Ok(resp);
         }
     }
-    bail!("MCP SSE: result/error を含むメッセージが無い");
+    bail!("MCP SSE: no message with result/error")
 }
 
-/// 生 SSE 本文を `data:` 行ベースに分解する。
+/// Split a raw SSE body into one string per event, joining repeated `data:`
+/// lines with `\n`.
 ///
-/// 仕様:
-///   - イベントは空行 (`\n\n`) で区切る
-///   - 1 イベント内の複数 `data:` 行は `\n` で連結
-///   - `event:` `id:` `retry:` は無視（MCP では使わない）
-///   - `data:` の直後の半角スペース 1 個だけは食わせる（SSE 仕様）
+/// Rules:
+///   - Events are separated by a blank line (`\n\n`)
+///   - Multiple `data:` lines within one event are joined by `\n`
+///   - `event:` / `id:` / `retry:` are ignored (MCP doesn't use them)
+///   - At most one literal space right after `data:` is stripped (SSE spec)
 pub fn extract_sse_data(text: &str) -> Vec<String> {
     let mut out = Vec::new();
-    // CRLF を LF に正規化してから分割
+    // Normalize CRLF before splitting.
     let normalized = text.replace("\r\n", "\n");
     for block in normalized.split("\n\n") {
         let mut buf = String::new();
@@ -221,7 +226,7 @@ pub fn extract_sse_data(text: &str) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
-// テスト — パーサ部のみ（HTTP 部はモック無しで MVP 段階は手動 REPL 確認）
+// Tests — parser only (the HTTP layer is verified by manual REPL runs at MVP)
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -244,7 +249,7 @@ mod tests {
 
     #[test]
     fn parse_response_handles_single_json_tools_list() {
-        // application/json 単発: `result.tools` が見える
+        // application/json single-shot: `result.tools` is visible.
         let body = r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search","inputSchema":{"type":"object"}}]}}"#;
         let r = parse_response_payload("application/json", body).unwrap();
         let result = r.result.unwrap();
@@ -253,7 +258,7 @@ mod tests {
 
     #[test]
     fn parse_response_handles_sse_tools_list_after_notification() {
-        // SSE: 先頭にサーバ通知が来ても、result/error フレームを拾える
+        // SSE: even with a leading server notification, the result frame is found.
         let body = "event: message\n\
                     data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/log\",\"params\":{}}\n\n\
                     event: message\n\

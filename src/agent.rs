@@ -1,24 +1,26 @@
-// agent — 1 ターン分の chat ループ（SPEC §8）。
+// agent — one turn of the chat loop (SPEC §8).
 //
-// ループ構造（SPEC §8 ステップ 1–3）:
+// Loop structure (SPEC §8 steps 1–3):
 //
-//   1. user メッセージを session に push（ターン頭、1 回だけ）
-//   2. ループ反復 i = 0..max_tool_iterations:
-//      a. ctx.require_active_model() で配線済みエンドポイント情報を取得
-//         - tools には ctx.mcp.as_openai_tools() を渡す（空なら None でフィールド省略）
-//      b. SSE ストリームを回し、content と tool_calls を蓄積（`accumulate`）
-//      c. 蓄積を assistant メッセージとして push
-//      d. tool_calls が空 → 完了して break
-//      e. tool_calls があれば各呼び出しを `McpManager.call` で実行し、結果を
-//         `tool` メッセージ（`tool_call_id` 必須）として push してループ継続
-//         - tool 側エラー / ネットワーク失敗は "error: ..." を content に詰めてループ継続
-//           （モデルに失敗を伝えることで自己回復できるようにする）
-//   3. max_tool_iterations に達しても tool_calls が空にならなければ警告を出して打ち切り
-//      （aichat 系で見られた「壊れたツールでループ消費して制御戻らない」の回避）
+//   1. Push the user message to the session (once per turn, at the top)
+//   2. Iterate i = 0..max_tool_iterations:
+//      a. Get the wired endpoint info via `ctx.require_active_model()`
+//         - tools is `ctx.mcp.as_openai_tools()` (omit the field entirely if empty)
+//      b. Run the SSE stream, accumulating content and tool_calls (`accumulate`)
+//      c. Push the accumulated assistant message
+//      d. tool_calls empty → done, break
+//      e. tool_calls non-empty → execute each via `McpManager.call` and push the
+//         result as a `tool` message (`tool_call_id` required), then continue the loop
+//         - Tool-side / network errors become `"error: ..."` content so the loop
+//           can keep going (telling the model so it can self-recover)
+//   3. If max_tool_iterations is reached without tool_calls becoming empty, warn
+//      and abort (this is the aichat-style "broken tool eats the loop and never
+//      returns control" failure mode we want to avoid).
 //
-// 描画はこのモジュールの責務ではない。`TurnObserver` トレイトに「何が起きたか」を通知
-// するだけで、それをどう端末に出すかは実装（`repl::view::TerminalView`）に委ねる。
-// この境界のおかげで、蓄積ロジック（`accumulate`）は画面副作用ゼロで単体テストできる。
+// Rendering is not this module's responsibility. We notify a `TurnObserver` of
+// what's happening; how it appears on the terminal is up to the impl (see
+// `repl::view::TerminalView`). Thanks to this boundary, the accumulation logic
+// (`accumulate`) has zero screen side effects and is easy to unit-test.
 
 use std::collections::BTreeMap;
 
@@ -31,25 +33,26 @@ use crate::llm::types::{ChatRequest, FunctionCall, Message, Tool, ToolCall};
 use crate::llm::ChatClient;
 use crate::repl::context::ReplContext;
 
-/// 1 ターン中に起きる「描画したい出来事」の語彙。
+/// Vocabulary of "things worth displaying" during a single turn.
 ///
-/// agent はこのインターフェースだけを知り、実際の出力（端末・テスト捕捉・将来の非TTY）
-/// は実装側が決める。`assistant_start` / `assistant_end` はデフォルト空実装にしてあるので、
-/// テスト用フェイクは本文・ツールイベントだけ拾えばよい。
+/// The agent only knows this interface; the actual output (terminal, test capture,
+/// future non-TTY backends) is decided by the implementor. `assistant_start` and
+/// `assistant_end` have empty default impls so a test fake can just pick up
+/// the body and tool events.
 pub trait TurnObserver {
-    /// assistant メッセージのストリーム開始（per-message 状態のリセット用）。
+    /// Stream start for an assistant message (use to reset per-message state).
     fn assistant_start(&mut self) {}
-    /// assistant 本文の差分チャンク。
+    /// Delta chunk of the assistant body.
     fn assistant_delta(&mut self, chunk: &str);
-    /// assistant メッセージのストリーム終了。
+    /// Stream end for an assistant message.
     fn assistant_end(&mut self) {}
-    /// ツール呼び出し開始。`raw_arguments` は未整形（プレビュー整形は実装側の判断）。
+    /// Tool call begins. `raw_arguments` is unformatted (preview formatting is left to the impl).
     fn tool_call(&mut self, public_name: &str, raw_arguments: &str);
-    /// ツール成功。
+    /// Tool call succeeded.
     fn tool_succeeded(&mut self, public_name: &str);
-    /// ツール失敗。`error_text` は tool メッセージ content に詰める文面と同じ。
+    /// Tool call failed. `error_text` is the same string that goes into the tool message content.
     fn tool_failed(&mut self, public_name: &str, error_text: &str);
-    /// max_tool_iterations 到達で打ち切ったとき。
+    /// We hit `max_tool_iterations` and aborted.
     fn iteration_limit_reached(&mut self, max: u32);
 }
 
@@ -60,14 +63,16 @@ pub async fn run_turn(
 ) -> Result<()> {
     ctx.session.messages.push(Message::user(user_input));
 
-    // ActiveModel はモデル選択時に 1 度だけ解決済み。agent は Settings を知らなくていい。
-    // clone するのは「以降 ctx を &mut で借り直したい（mcp.call 等）」ため。
+    // ActiveModel is resolved once when the model is selected. The agent doesn't
+    // need to know about Settings. We clone here so we can later re-borrow ctx
+    // mutably (e.g. for mcp.call).
     let active = ctx.require_active_model()?;
     let max_iter = ctx.settings.ui.max_tool_iterations;
     let client = ChatClient::new(ctx.http.clone());
 
     for _iter in 0..max_iter {
-        // MCP ツールは毎反復で最新化（空配列なら tools フィールドごと省く）。
+        // Re-fetch the MCP tools on every iteration. (If the list is empty,
+        // we omit the `tools` field entirely.)
         let tool_list = ctx.mcp.as_openai_tools();
         let tools: Option<Vec<Tool>> = if tool_list.is_empty() {
             None
@@ -94,12 +99,12 @@ pub async fn run_turn(
         let tool_calls = assistant.tool_calls().to_vec();
         ctx.session.messages.push(assistant);
 
-        // tool_calls が空 → 通常応答完了
+        // tool_calls empty → ordinary response, we're done.
         if tool_calls.is_empty() {
             return Ok(());
         }
 
-        // それぞれ実行 → tool メッセージとして push
+        // Execute each tool_call and push a tool message.
         for tc in tool_calls {
             let public_name = tc.function.name.clone();
             view.tool_call(&public_name, &tc.function.arguments);
@@ -111,15 +116,16 @@ pub async fn run_turn(
                         text
                     }
                     Err(e) => {
-                        // tool 側エラーやネットワーク失敗もループは続ける。
-                        // モデルが「失敗した」と知れば再試行や別ツールに切り替えられる。
+                        // Tool-side errors and network failures don't break the loop.
+                        // Telling the model "this failed" lets it retry or pick a
+                        // different tool.
                         let msg = format!("error: {e:#}");
                         view.tool_failed(&public_name, &msg);
                         msg
                     }
                 },
                 Err(e) => {
-                    let msg = format!("error: arguments JSON のパース失敗: {e}");
+                    let msg = format!("error: failed to parse arguments JSON: {e}");
                     view.tool_failed(&public_name, &msg);
                     msg
                 }
@@ -129,15 +135,17 @@ pub async fn run_turn(
         }
     }
 
-    // 上限到達。最後の assistant ターンは tool_calls を持っていた状態なので、
-    // モデルから見ると未完了に見える。ユーザには警告だけ出して制御を返す。
+    // Cap reached. The last assistant turn still carried tool_calls, so from the
+    // model's perspective the conversation is incomplete. We just warn the user
+    // and return control to the REPL.
     view.iteration_limit_reached(max_iter);
     Ok(())
 }
 
-/// 1 回分のストリームを開いて assistant メッセージを組み上げる。
+/// Open one stream and build the assistant message from it.
 ///
-/// ネットワーク確立は `ChatClient::stream` に任せ、蓄積本体は `accumulate` に委譲する。
+/// Network setup is delegated to `ChatClient::stream`; the actual accumulation
+/// happens in `accumulate`.
 async fn stream_assistant(
     client: &ChatClient,
     endpoint: &str,
@@ -150,26 +158,27 @@ async fn stream_assistant(
     accumulate(stream, view).await
 }
 
-/// `StreamEvent` 列を消費し、`content` 連結と `tool_calls` の index ごと結合を行って
-/// `Message::Assistant` を返す。ネットワークに依存しないので（`stream::iter` 等で）
-/// 単体テストできる — SPEC §6.1 のフラグメント結合をここで検証する。
+/// Consume a stream of `StreamEvent`s, concatenate `content`, merge `tool_calls`
+/// per index, and return the resulting `Message::Assistant`. Network-independent
+/// (tests can drive it with `stream::iter`), so this is where we verify
+/// SPEC §6.1's fragment-joining rules.
 ///
-/// 本文チャンクは届くたびに `view.assistant_delta` へ流す。`view.assistant_start` /
-/// `assistant_end` でストリームの開始・終了を通知する。
+/// Body chunks are streamed to `view.assistant_delta` as they arrive. Start and
+/// end of the stream are signalled via `assistant_start` / `assistant_end`.
 async fn accumulate(
     stream: impl Stream<Item = Result<StreamEvent>>,
     view: &mut dyn TurnObserver,
 ) -> Result<Message> {
-    // unfold ベースのストリームは Unpin ではないので Box::pin で固定する
+    // The unfold-based stream isn't Unpin, so we Box::pin it.
     let mut stream = Box::pin(stream);
 
     let mut content = String::new();
-    // index → 蓄積中の (id, name, arguments)
+    // index → in-progress (id, name, arguments)
     let mut tool_calls: BTreeMap<usize, ToolCallAccum> = BTreeMap::new();
 
     view.assistant_start();
     while let Some(event) = stream.next().await {
-        // [DONE] はストリーム側で None に変換済みなのでここには届かない
+        // [DONE] is converted to None at the stream layer, so it never reaches us here.
         let StreamEvent::Chunk(payload) = event?;
         if let Some(c) = payload.content {
             view.assistant_delta(&c);
@@ -177,14 +186,15 @@ async fn accumulate(
         }
         for delta in payload.tool_calls {
             let entry = tool_calls.entry(delta.index).or_default();
-            // SPEC §6.1: id と name は先頭フラグメントにしか来ない — None のときだけ上書き
+            // SPEC §6.1: id and name only arrive in the first fragment — only
+            // overwrite when None.
             if entry.id.is_none() {
                 entry.id = delta.id;
             }
             if entry.name.is_none() {
                 entry.name = delta.name;
             }
-            // arguments は分割されて届くので全断片を連結
+            // arguments arrives fragmented; concatenate every fragment.
             if let Some(frag) = delta.arguments_fragment {
                 entry.arguments.push_str(&frag);
             }
@@ -192,9 +202,9 @@ async fn accumulate(
     }
     view.assistant_end();
 
-    // 蓄積を ToolCall 列に変換（index 昇順は BTreeMap が保証）
-    // id / name が None のまま完了することは正常系ではあり得ないが、
-    // unwrap_or_default で空文字にとどめてパニックを避ける。
+    // Convert accumulators to ToolCall list (BTreeMap guarantees index order).
+    // id/name being None at completion is a server bug, not a normal case;
+    // unwrap_or_default keeps us from panicking.
     let tool_calls_vec: Vec<ToolCall> = tool_calls
         .into_iter()
         .map(|(_, a)| ToolCall {
@@ -213,17 +223,17 @@ async fn accumulate(
     })
 }
 
-/// LLM が返した `function.arguments`（JSON 文字列）を `Value` に直す。
+/// Parse the JSON string in `function.arguments` (returned by the LLM) into a `Value`.
 ///
-/// - 空文字は OpenAI 仕様上「引数なし」を意味するので `{}` 扱い。
-/// - パース失敗は呼び出し側で tool エラーとして扱えるよう Err にする。
+/// - Per OpenAI's convention, an empty string means "no arguments" → return `{}`.
+/// - On parse failure return Err so the caller can record it as a tool error.
 fn parse_tool_arguments(raw: &str) -> Result<Value> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Ok(serde_json::json!({}));
     }
     serde_json::from_str(trimmed)
-        .with_context(|| format!("arguments JSON のパース失敗: {raw}"))
+        .with_context(|| format!("failed to parse arguments JSON: {raw}"))
 }
 
 #[derive(Default)]
@@ -268,7 +278,7 @@ mod tests {
 
     // --- accumulate -----------------------------------------------------------
 
-    /// 画面に出さず、観測したイベントを記録するだけのフェイク。
+    /// Records the events it observes without printing anything.
     #[derive(Default)]
     struct CapturingView {
         events: Vec<String>,
@@ -327,13 +337,13 @@ mod tests {
             }
             other => panic!("expected Assistant, got {other:?}"),
         }
-        // 本文チャンクが順に view へ流れる（assistant_start/end は CapturingView では no-op）
+        // Body chunks flow into the view in order (assistant_start/end are no-ops in CapturingView).
         assert_eq!(view.events, vec!["delta:Hel", "delta:lo"]);
     }
 
     #[tokio::test]
     async fn accumulate_assembles_split_tool_call_fragments() {
-        // SPEC §6.1: 先頭フラグメントに id+name、arguments は複数断片に分割。
+        // SPEC §6.1: head fragment has id+name; arguments is split across fragments.
         let events = vec![
             tool_event(0, Some("call_1"), Some("search"), Some("")),
             tool_event(0, None, None, Some(r#"{"q":"#)),
@@ -346,7 +356,7 @@ mod tests {
         assert_eq!(calls[0].id, "call_1");
         assert_eq!(calls[0].function.name, "search");
         assert_eq!(calls[0].function.arguments, r#"{"q":"hi"}"#);
-        // 本文が無いので delta は流れない
+        // No body content → no deltas.
         assert!(view.events.is_empty());
     }
 
@@ -371,7 +381,7 @@ mod tests {
 
     #[tokio::test]
     async fn accumulate_two_parallel_tool_calls_by_index() {
-        // 異なる index は別バケット。index 昇順で並ぶ（BTreeMap）。
+        // Different indices → separate buckets, ordered by index (BTreeMap).
         let events = vec![
             tool_event(0, Some("a"), Some("first"), Some("{}")),
             tool_event(1, Some("b"), Some("second"), Some("{}")),

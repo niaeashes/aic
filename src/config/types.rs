@@ -1,14 +1,15 @@
-// config/types — 設定型の定義と impl（SPEC §4.2, §11）。
+// config/types — configuration type definitions and impls (SPEC §4.2, §11).
 //
-// このファイルには「YAML から読む設定スキーマ型」だけを置く:
-//   Settings      — アプリ全体の設定
-//   ModelGroup    — モデルグループ（base_url / api_key / headers / models）
-//   McpServerCfg  — MCP サーバ設定
-//   UiConfig      — UI 設定（history_size, max_tool_iterations）
-//   ModelRef      — `<group>:<model>` 形式の識別子（SPEC §2, §10）
+// This file holds only the "YAML configuration schema" types:
+//   Settings      — Application-wide config
+//   ModelGroup    — A model group (base_url / api_key / headers / models)
+//   McpServerCfg  — MCP server config
+//   UiConfig      — UI config (history_size, max_tool_iterations)
+//   ModelRef      — `<group>:<model>` identifier (SPEC §2, §10)
 //
-// 「ランタイム解決済みの実体」である `ActiveModel` は `src/active_model.rs` に独立。
-// ファイル I/O（load / shallow_merge 等）は loader.rs、シークレット復号は secrets.rs。
+// The "runtime-resolved instance" (`ActiveModel`) lives in `src/active_model.rs`.
+// File I/O (load / shallow_merge etc.) is in loader.rs; secret decryption is in
+// secrets.rs.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -19,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::secrets::Secrets;
 
 // ---------------------------------------------------------------------------
-// 設定型
+// Configuration types
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -33,7 +34,7 @@ pub struct Settings {
     #[serde(default)]
     pub ui: UiConfig,
 
-    // ファイル位置に依存する派生情報。serde では扱わず、load 後に詰める。
+    // File-location-derived metadata. Not serialized; filled in after load.
     #[serde(skip)]
     pub config_dir: PathBuf,
 }
@@ -89,8 +90,8 @@ fn default_max_tool_iter() -> u32 {
 }
 
 // ---------------------------------------------------------------------------
-// ModelRef — `<group>:<model>` 形式（SPEC §2, §10）
-// model 名自体が `:` を含むので、splitn(2, ':') で必ず 1 回だけ分割する。
+// ModelRef — `<group>:<model>` format (SPEC §2, §10)
+// Model names can contain `:`, so we always split with splitn(2, ':') — exactly once.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,13 +103,13 @@ pub struct ModelRef {
 impl ModelRef {
     pub fn parse(s: &str) -> Result<Self> {
         let mut parts = s.splitn(2, ':');
-        let group = parts.next().context("model ref が空")?.trim();
+        let group = parts.next().context("model ref is empty")?.trim();
         let model = parts
             .next()
-            .with_context(|| format!("model ref は '<group>:<model>' 形式が必要: {s:?}"))?
+            .with_context(|| format!("model ref must be in '<group>:<model>' form: {s:?}"))?
             .trim();
         if group.is_empty() || model.is_empty() {
-            anyhow::bail!("group / model はどちらも非空である必要がある: {s:?}");
+            anyhow::bail!("both group and model must be non-empty: {s:?}");
         }
         Ok(Self {
             group: group.to_string(),
@@ -137,21 +138,22 @@ impl Serialize for ModelRef {
 }
 
 // ---------------------------------------------------------------------------
-// Settings ヘルパ — 検索・展開・機密マスク
+// Settings helpers — lookup, ${VAR} expansion, secret redaction
 // ---------------------------------------------------------------------------
 
-/// 機密値の表示用マスク文字列。`/config show` と `/config setup` のプレビューで使う。
+/// Mask string used when displaying secret values. Shared by `/config show` and
+/// `/config setup`'s preview.
 pub const REDACTED: &str = "***";
 
 impl Settings {
-    /// グループ名で `ModelGroup` を引く。O(n) だがグループ数は数個想定。
+    /// Lookup a ModelGroup by name. O(n), but group count is in the single digits.
     pub fn group_by_name(&self, name: &str) -> Option<&ModelGroup> {
         self.model_groups.iter().find(|g| g.name == name)
     }
 
-    /// config 内の `${VAR}` を全フィールドに対して展開する（M5, SPEC §5）。
+    /// Expand `${VAR}` in every relevant Settings field (M5, SPEC §5).
     ///
-    /// 起動時に 1 回だけ呼ぶ。以降の利用箇所は展開済み前提。
+    /// Called once at startup; downstream code assumes the values are already expanded.
     pub fn expand_secrets(&mut self, secrets: &Secrets) {
         for g in &mut self.model_groups {
             if let Some(k) = g.api_key.as_mut() {
@@ -168,11 +170,13 @@ impl Settings {
         }
     }
 
-    /// 機密値（api_key / 各 headers の値）を `***` に置換した deep-clone を返す。
+    /// Return a deep clone with secret values (api_key, every headers value)
+    /// replaced by `***`.
     ///
-    /// 利用箇所: `/config show`、`/config setup` のプレビュー。
-    /// secret-bearing でないヘッダ（Content-Type 等）も区別せず一律マスクする
-    /// — config に手で書く header は基本 auth 系のみ、という運用前提。
+    /// Used by `/config show` and the `/config setup` preview. We don't try to
+    /// distinguish secret-bearing headers from non-secret ones (Content-Type
+    /// etc.) — the operational assumption is that headers written into config
+    /// by hand are auth-related.
     pub fn redacted(&self) -> Self {
         let mut s = self.clone();
         for g in &mut s.model_groups {
@@ -193,7 +197,7 @@ impl Settings {
 }
 
 // ---------------------------------------------------------------------------
-// テスト
+// Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -302,7 +306,7 @@ mod tests {
         assert_eq!(r.model_groups[0].api_key.as_deref(), Some(REDACTED));
         assert_eq!(r.model_groups[0].headers["Authorization"], REDACTED);
         assert_eq!(r.mcp_servers[0].headers["X-Auth"], REDACTED);
-        // 非秘匿フィールドは保持
+        // Non-secret fields are preserved.
         assert_eq!(r.model_groups[0].base_url, "https://api.openai.com/v1");
         assert_eq!(r.model_groups[0].models, vec!["gpt-4o-mini".to_string()]);
     }

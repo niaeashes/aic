@@ -1,16 +1,16 @@
-// mcp/manager — MCP 全サーバを束ねるマネージャと公開名カタログ（SPEC §7.4, §14-6）。
+// mcp/manager — Manager that bundles all MCP servers and exposes the public-name catalog (SPEC §7.4, §14-6).
 //
-// 公開ツール名は **必ず** `"<server>__<tool>"` の合成キーで `BTreeMap` に保持し、
-// LLM へは `as_openai_tools()` がこの合成キーをそのまま渡す。`tools/call` 時は
-// マップから (server_idx, 実ツール名) を引き直して投げる — 名前文字列をパースし直さ
-// ない（SPEC §7.4）。BTreeMap を使うことで挿入のたびにソート済みを保証し、
-// `as_openai_tools()` での再ソートが不要になる。
+// The name exposed to the LLM is **always** the composite `"<server>__<tool>"`,
+// held in a `BTreeMap`. `as_openai_tools()` hands these composite names to the
+// LLM; on `tools/call`, we look up `(server_idx, real_tool_name)` from the
+// map — we never re-parse the string (SPEC §7.4). Using `BTreeMap` guarantees
+// sorted order so `as_openai_tools()` doesn't need to re-sort.
 //
-// 起動シーケンス（main.rs から呼ぶ）:
-//   1. `McpManager::connect_all(&settings, http)` で enabled な全サーバへ:
-//        initialize → notifications/initialized → tools/list
-//   2. 失敗したサーバはログだけ残してスキップ（aic 起動は止めない）
-//   3. ReplContext に格納し、以降 agent.rs から触る
+// Startup flow (called from main.rs):
+//   1. `McpManager::connect_all(&settings, http)` runs `initialize →
+//      notifications/initialized → tools/list` for every enabled server.
+//   2. Per-server failure → log only, skip (aic startup doesn't fail).
+//   3. Store the manager into ReplContext; agent.rs uses it from here on.
 
 use std::collections::BTreeMap;
 
@@ -25,20 +25,21 @@ use crate::mcp::protocol::{
 };
 use crate::mcp::transport::Transport;
 
-/// 1 つの MCP サーバの稼働状態 + 取得済みツール一覧。
+/// One MCP server's connection state plus the fetched tool list.
 ///
-/// サーバ名は公開ツール名（`<server>__<tool>`）に埋め込み済みで `catalog` から復元
-/// できるため、ここでは保持しない（`tools` は `as_openai_tools` の schema 引き当て用）。
+/// The server name is embedded in each public tool name (`<server>__<tool>`) and
+/// recoverable via `catalog`, so we don't store it here. `tools` is kept for
+/// `as_openai_tools` schema lookup.
 struct McpServer {
     tools: Vec<McpToolDef>,
     transport: Transport,
 }
 
 pub struct McpManager {
-    /// 接続済みサーバ群。index は `catalog` の値から参照される（内部表現なので非公開）。
+    /// Connected servers. Index is referenced from `catalog`'s value (kept private).
     servers: Vec<McpServer>,
-    /// 公開名 `"<server>__<tool>"` → (server_idx, 実ツール名)。SPEC §7.4。
-    /// BTreeMap なのでキー順が常にソート済み — `as_openai_tools` で再ソート不要。
+    /// Public name `"<server>__<tool>"` → (server_idx, real tool name). SPEC §7.4.
+    /// BTreeMap keeps keys sorted — `as_openai_tools` doesn't need to re-sort.
     catalog: BTreeMap<String, (usize, String)>,
 }
 
@@ -49,8 +50,8 @@ impl Default for McpManager {
 }
 
 impl McpManager {
-    /// MCP サーバ無し（config に書かれていない or 全失敗）でも REPL を回せるよう、
-    /// 「空のマネージャ」を作れるようにしておく。
+    /// Construct an "empty manager" so the REPL still runs even when no MCP
+    /// servers are configured (or all failed).
     pub fn empty() -> Self {
         Self {
             servers: Vec::new(),
@@ -58,12 +59,13 @@ impl McpManager {
         }
     }
 
-    /// 設定上の全 enabled サーバへ初期化 → tools/list。失敗は per-server で握りつぶす。
+    /// Run initialize → tools/list against every enabled server. Per-server
+    /// failures are absorbed.
     pub async fn connect_all(settings: &Settings, http: reqwest::Client) -> Self {
         let mut mgr = Self::empty();
         for cfg in &settings.mcp_servers {
             if !cfg.enabled {
-                eprintln!("mcp: {} は disabled のためスキップ", cfg.name);
+                eprintln!("mcp: {} disabled, skipping", cfg.name);
                 continue;
             }
             let mut transport = Transport::new(cfg.url.clone(), cfg.headers.clone(), http.clone());
@@ -71,35 +73,35 @@ impl McpManager {
                 Ok(tools) => {
                     let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
                     eprintln!(
-                        "mcp: {} に接続成功（tools: {}）",
+                        "mcp: connected to {} (tools: {})",
                         cfg.name,
                         names.join(", ")
                     );
                     mgr.push_server(cfg.name.clone(), transport, tools);
                 }
                 Err(e) => {
-                    eprintln!("warning: mcp {} 接続失敗（スキップ）: {e:#}", cfg.name);
+                    eprintln!("warning: mcp {} connection failed (skipping): {e:#}", cfg.name);
                 }
             }
         }
-        // LLM に渡る公開名（`<server>__<tool>`）の最終一覧を 1 度だけ出す。
-        // per-server ログは実ツール名だが、ここは衝突回避済みの公開名なので
-        // 「モデルから実際に見えるカタログ」を確認できる（SPEC §7.4, MILESTONES M6 DoD）。
+        // Print the final public-name list (post-collision-resolution) once.
+        // The per-server log shows real names; this log shows what the model
+        // actually sees in the catalog (SPEC §7.4, MILESTONES M6 DoD).
         let names = mgr.public_tool_names();
         if !names.is_empty() {
-            eprintln!("mcp: 公開ツール {} 件: {}", names.len(), names.join(", "));
+            eprintln!("mcp: {} public tools: {}", names.len(), names.join(", "));
         }
         mgr
     }
 
-    /// 全公開ツール名（`<server>__<tool>`）を文字列ソート順で返す。
-    /// 起動時のカタログ要約ログで使う。
+    /// All public tool names (`<server>__<tool>`) in sorted order. Used by the
+    /// startup catalog log.
     pub fn public_tool_names(&self) -> Vec<String> {
         self.catalog.keys().cloned().collect()
     }
 
-    /// OpenAI 互換 `tools` 配列を生成。空なら呼び出し側で `None` 化することで
-    /// `ChatRequest.tools` フィールド自体を省略できる。
+    /// Build the OpenAI-compatible `tools` array. If empty, callers should
+    /// substitute `None` so the `ChatRequest.tools` field can be omitted entirely.
     pub fn as_openai_tools(&self) -> Vec<Tool> {
         let mut out = Vec::with_capacity(self.catalog.len());
         for (public_name, (idx, real_name)) in &self.catalog {
@@ -123,12 +125,13 @@ impl McpManager {
         out
     }
 
-    /// 公開名でツールを呼ぶ。テキストコンテンツを `\n` 連結で返す。
+    /// Invoke a tool by its public name. Returns concatenated text content
+    /// joined by `\n`.
     pub async fn call(&mut self, public_name: &str, arguments: Value) -> Result<String> {
         let (idx, real_name) = self
             .catalog
             .get(public_name)
-            .with_context(|| format!("未知の MCP ツール: {public_name}"))?
+            .with_context(|| format!("unknown MCP tool: {public_name}"))?
             .clone();
         let server = &mut self.servers[idx];
         let value = server
@@ -142,7 +145,7 @@ impl McpManager {
             )
             .await?;
         let parsed: ToolsCallResult =
-            serde_json::from_value(value).context("tools/call result スキーマが想定外")?;
+            serde_json::from_value(value).context("unexpected tools/call result schema")?;
 
         let mut text = String::new();
         for block in parsed.content {
@@ -159,7 +162,7 @@ impl McpManager {
         Ok(text)
     }
 
-    /// `connect_all` 内部で使う登録ヘルパ。`pub(crate)` でテストからも叩ける。
+    /// Registration helper used by `connect_all` (and tests via `pub(crate)`).
     pub(crate) fn push_server(
         &mut self,
         name: String,
@@ -175,7 +178,7 @@ impl McpManager {
     }
 }
 
-/// initialize → notifications/initialized → tools/list を順に叩く。
+/// Run initialize → notifications/initialized → tools/list, in order.
 async fn initialize_and_list(transport: &mut Transport) -> Result<Vec<McpToolDef>> {
     let init = InitializeParams {
         protocol_version: PROTOCOL_VERSION.to_string(),
@@ -188,22 +191,22 @@ async fn initialize_and_list(transport: &mut Transport) -> Result<Vec<McpToolDef
     transport
         .request("initialize", init)
         .await
-        .context("initialize 失敗")?;
+        .context("initialize failed")?;
     transport
         .notify("notifications/initialized", json!({}))
         .await
-        .context("notifications/initialized 失敗")?;
+        .context("notifications/initialized failed")?;
     let list = transport
         .request("tools/list", json!({}))
         .await
-        .context("tools/list 失敗")?;
+        .context("tools/list failed")?;
     let parsed: ToolsListResult =
-        serde_json::from_value(list).context("tools/list result スキーマが想定外")?;
+        serde_json::from_value(list).context("unexpected tools/list result schema")?;
     Ok(parsed.tools)
 }
 
 // ---------------------------------------------------------------------------
-// テスト
+// Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]

@@ -1,9 +1,9 @@
-// mcp — MCP Streamable HTTP クライアント（SPEC §7, §14-6）。
+// mcp — MCP Streamable HTTP client (SPEC §7, §14-6).
 //
-// サブモジュール構成:
-//   manager.rs  — McpManager / McpServer（サーバ接続・ツールカタログ・tools/call）
-//   protocol.rs — JSON-RPC 2.0 型と MCP メッセージ型
-//   transport.rs — POST ベースの Streamable HTTP トランスポート
+// Sub-modules:
+//   manager.rs   — McpManager / McpServer (connections, tool catalog, tools/call)
+//   protocol.rs  — JSON-RPC 2.0 types and MCP message types
+//   transport.rs — POST-based Streamable HTTP transport
 
 pub mod manager;
 pub mod protocol;

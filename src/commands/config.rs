@@ -1,16 +1,17 @@
-// /config — 現在の設定の確認 + 初期化ウィザード起動（SPEC §10, MILESTONES.md M4, M8）。
+// /config — view current configuration and launch the setup wizard (SPEC §10, MILESTONES.md M4, M8).
 //
-// サブコマンド:
-//   - `show`  : 現在の Settings を YAML で表示。api_key / headers の値はマスク。
-//   - `setup` : `config::wizard` を起動し、結果を確認の上 config.yaml に書き出す。
+// Subcommands:
+//   - `show`  : print the current Settings as YAML, with api_key / headers masked.
+//   - `setup` : start the `config::wizard` and write the result to config.yaml after confirmation.
 //
-// このファイルは「コマンドとしての配線」と「ファイル書き出しのフロー」だけを持つ:
-//   - 機密マスクのロジック  → `Settings::redacted()`（`config/types.rs`）
-//   - 対話 IO プリミティブ → `repl::prompt`
-//   - 収集ドメイン        → `config::wizard`
+// This file only handles "command wiring" and the file-write flow:
+//   - Redaction logic           → `Settings::redacted()` (`config/types.rs`)
+//   - Interactive IO primitives → `repl::prompt`
+//   - Collection domain         → `config::wizard`
 //
-// rustyline の readline 待機中ではないので、wizard 内は `std::io::stdin().lock()` を
-// `BufRead` として渡せる（外側の rustyline と衝突しない）。
+// We're not inside rustyline's readline when this command runs, so we can grab
+// `std::io::stdin().lock()` as a `BufRead` to feed the wizard (no conflict with
+// the outer rustyline editor).
 
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
@@ -29,7 +30,7 @@ impl Command for Config {
     }
 
     fn help(&self) -> &'static str {
-        "`show` で現在の設定を表示 / `setup` で対話的にホーム config.yaml を生成"
+        "`show` prints the current config / `setup` runs the interactive wizard"
     }
 
     async fn run(&self, args: &str, ctx: &mut ReplContext) -> Result<Outcome> {
@@ -37,7 +38,7 @@ impl Command for Config {
         match sub {
             "" | "show" => show(&ctx.settings),
             "setup" => setup(ctx),
-            other => bail!("不明なサブコマンド: {other}（使い方: /config show | /config setup）"),
+            other => bail!("unknown subcommand: {other} (usage: /config show | /config setup)"),
         }
     }
 }
@@ -52,11 +53,12 @@ fn show(settings: &Settings) -> Result<Outcome> {
 }
 
 fn setup(ctx: &mut ReplContext) -> Result<Outcome> {
-    // 書き出し先は ctx.settings.config_dir（main.rs でロード済み）配下の config.yaml。
-    // `--config <path>` 指定時も config_dir はそのパスの親ディレクトリになっているため、
-    // ここで再評価する必要はない。home_config_path(None) を使うと --config 指定が無視される。
+    // The write target is `ctx.settings.config_dir/config.yaml` (loaded in main.rs).
+    // When `--config <path>` is explicit, `config_dir` is already the parent of
+    // that path, so no recalculation is needed here. Using `home_config_path(None)`
+    // would ignore the explicit override.
     let target = if ctx.settings.config_dir.as_os_str().is_empty() {
-        home_config_path(None).context("ホーム config パスの解決に失敗")?
+        home_config_path(None).context("failed to resolve home config path")?
     } else {
         ctx.settings.config_dir.join("config.yaml")
     };
@@ -64,39 +66,39 @@ fn setup(ctx: &mut ReplContext) -> Result<Outcome> {
     let stdin = std::io::stdin();
     let mut stdin = stdin.lock();
 
-    println!("aic config setup — 対話的にホーム config.yaml を生成します。");
-    println!("書き出し先: {}", target.display());
+    println!("aic config setup — interactively generate the home config.yaml.");
+    println!("write target: {}", target.display());
 
     if target.exists()
-        && !prompt_bool(&mut stdin, "既存ファイルがあります。上書きしますか？", false)?
+        && !prompt_bool(&mut stdin, "File already exists. Overwrite?", false)?
     {
-        println!("setup を中断しました。");
+        println!("setup aborted.");
         return Ok(Outcome::Continue);
     }
 
     let new_settings = wizard::run(&mut stdin, &ctx.settings)?;
 
-    // プレビュー（redact 済み）
-    println!("\n=== 生成される config.yaml（秘匿値はマスク表示）===");
+    // Preview (redacted)
+    println!("\n=== resulting config.yaml (secrets masked) ===");
     print!("{}", serde_yml::to_string(&new_settings.redacted())?);
     println!("===");
 
-    if !prompt_bool(&mut stdin, "\nこの内容で書き出しますか？", true)? {
-        println!("setup を中断しました。");
+    if !prompt_bool(&mut stdin, "\nWrite this to disk?", true)? {
+        println!("setup aborted.");
         return Ok(Outcome::Continue);
     }
 
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)
-            .with_context(|| format!("ディレクトリ作成失敗: {}", parent.display()))?;
+            .with_context(|| format!("failed to create directory: {}", parent.display()))?;
     }
     let yaml = serde_yml::to_string(&new_settings)?;
     std::fs::write(&target, yaml)
-        .with_context(|| format!("書き出し失敗: {}", target.display()))?;
+        .with_context(|| format!("failed to write: {}", target.display()))?;
     println!("wrote: {}", target.display());
-    println!("注意: 反映には `aic` の再起動が必要です。secrets は別途 `env.json` を");
+    println!("Note: restart `aic` for changes to take effect. Set up secrets separately");
     println!(
-        "      作成し、必要なら `aic env seal` で `env.json.enc` に封印してください。"
+        "      via `env.json` and, if you want, `aic env seal` to seal them into `env.json.enc`."
     );
 
     Ok(Outcome::Continue)

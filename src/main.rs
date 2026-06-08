@@ -1,14 +1,14 @@
 // aic — minimal interactive chat CLI
 //
-// 起動シーケンス:
-//   1. tracing 初期化（`RUST_LOG` で詳細度調整可、既定は warn）
-//   2. clap で引数解析（`aic`, `aic env seal|unseal`, `aic --config <path>`）
-//   3. config をホーム + プロジェクトの 2 層浅マージでロード（M1）
-//   4. config_dir から secrets をロード（M5: env.json.enc → env.json → 環境変数）
-//   5. Settings の `${VAR}` を全フィールドで展開（M5）
-//   6. ReplContext を組み立てて REPL ループへ
+// Startup sequence:
+//   1. Initialize tracing (filterable via `RUST_LOG`; default is warn)
+//   2. Parse args with clap (`aic`, `aic env seal|unseal`, `aic --config <path>`)
+//   3. Load config as a two-layer shallow merge of home + project (M1)
+//   4. Load secrets from config_dir (M5: env.json.enc → env.json → env vars)
+//   5. Expand `${VAR}` in every Settings field (M5)
+//   6. Build the ReplContext and start the REPL loop
 //
-// `env seal|unseal` は REPL を立ち上げずに secrets ファイルを操作して終了する。
+// `env seal|unseal` operates on the secrets files and exits without starting the REPL.
 
 use std::path::{Path, PathBuf};
 
@@ -29,7 +29,7 @@ use active_model::ActiveModel;
 #[derive(Debug, Parser)]
 #[command(name = "aic", about = "minimal interactive chat CLI", version)]
 struct Cli {
-    /// 明示的に使うホーム config ファイルパス（既定は `$AIC_CONFIG_DIR` か `~/.config/aic/config.yaml`）
+    /// Explicit path to the home config file (default: `$AIC_CONFIG_DIR` or `~/.config/aic/config.yaml`)
     #[arg(long, global = true, value_name = "PATH")]
     config: Option<PathBuf>,
 
@@ -39,7 +39,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Cmd {
-    /// secrets ファイル (env.json / env.json.enc) の管理（SPEC §5, M5）
+    /// Manage the secrets files (env.json / env.json.enc) (SPEC §5, M5)
     Env {
         #[command(subcommand)]
         action: EnvAction,
@@ -48,16 +48,17 @@ enum Cmd {
 
 #[derive(Debug, Subcommand)]
 enum EnvAction {
-    /// env.json → env.json.enc（鍵は Keychain へ。既存鍵があれば再利用）
+    /// env.json → env.json.enc (key goes into Keychain; reuse if one already exists)
     Seal,
-    /// env.json.enc → env.json（編集用に平文を取り出す）
+    /// env.json.enc → env.json (extracts the plaintext for editing)
     Unseal,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // `RUST_LOG` 未指定時は warn 以上のみ表示。`RUST_LOG=aic=debug` 等で詳細化できる。
-    // フィルタが構築失敗するのは想定外なので、unwrap_or_default で fall through。
+    // When `RUST_LOG` is unset, only warn-level and above are shown. Override with
+    // e.g. `RUST_LOG=aic=debug` for verbose logs. Filter construction is not
+    // expected to fail; fall through to the default instead of erroring out.
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("warn,aic=info"));
     tracing_subscriber::fmt()
@@ -80,8 +81,8 @@ async fn main() -> Result<()> {
     }
 }
 
-/// `aic env ...` 用に config ファイルではなくその「親ディレクトリ」だけを返す。
-/// `aic --config <path>` で明示指定があれば、その親をそのまま使う。
+/// For `aic env ...`, return the *parent directory* of the config file rather
+/// than the file itself. If `--config <path>` is explicit, use its parent as-is.
 fn resolve_config_dir(explicit_home: Option<&Path>) -> Result<PathBuf> {
     let path = config::home_config_path(explicit_home)?;
     Ok(path
@@ -92,13 +93,14 @@ fn resolve_config_dir(explicit_home: Option<&Path>) -> Result<PathBuf> {
 
 async fn run_repl(config_path: Option<PathBuf>) -> Result<()> {
     let mut settings = config::load(config_path.as_deref())?;
-    // secrets は config_dir 配下から拾う（env.json.enc → env.json → 環境変数のフォールバック）
+    // Load secrets from under config_dir (env.json.enc → env.json → env vars fallback).
     let secrets = config::secrets::Secrets::load(&settings.config_dir);
-    // ここで一度だけ `${VAR}` を全フィールドに適用する。以降の利用箇所は展開済み前提。
+    // Apply `${VAR}` substitution once, here. All later code assumes the expansion is done.
     settings.expand_secrets(&secrets);
 
-    // default_model があればここで 1 度だけ解決してキャッシュする。
-    // 失敗（group が設定に無い等）は起動を止めず、None で進んで agent 実行時にエラーを出す。
+    // If default_model is set, resolve it once and cache. Failure (e.g. group missing
+    // from config) doesn't block startup — we leave `None` and let the agent surface
+    // a clear error when the first turn runs.
     let current_model = settings
         .default_model
         .as_ref()
@@ -106,11 +108,12 @@ async fn run_repl(config_path: Option<PathBuf>) -> Result<()> {
 
     let http = reqwest::Client::new();
 
-    // MCP 接続。enabled サーバごとに initialize → tools/list を順に試す。
-    // 接続失敗は per-server で握りつぶされるので、起動は止まらない（SPEC §14-6）。
+    // Connect to MCP servers. For each enabled server we run initialize → tools/list.
+    // Per-server connection failures are absorbed so startup never blocks (SPEC §14-6).
     let mcp = mcp::McpManager::connect_all(&settings, http.clone()).await;
 
-    // secrets は expand_secrets で使い切り。以降は展開済みの settings だけ保持。
+    // `secrets` has done its job in expand_secrets. Drop it so only the expanded
+    // settings remain.
     drop(secrets);
 
     let mut ctx = repl::context::ReplContext {

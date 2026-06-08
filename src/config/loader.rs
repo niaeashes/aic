@@ -1,12 +1,12 @@
-// config/loader — config.yaml の読み込みと 2 層マージ（SPEC §4.1）。
+// config/loader — config.yaml loading and two-layer merge (SPEC §4.1).
 //
-// 公開 API:
-//   load(explicit_home)     — ホーム + プロジェクトを浅マージして Settings を返す
-//   home_config_path(p)     — ホーム config パスの解決
-//   project_config_path()   — 起動ディレクトリの aic.yaml（固定）
+// Public API:
+//   load(explicit_home)     — Shallow-merge home + project and return Settings
+//   home_config_path(p)     — Resolve the home config path
+//   project_config_path()   — `aic.yaml` in the current directory (fixed)
 //
-// マージ方針: トップレベルキー単位で overlay（プロジェクト側）が優先。
-// 要素マージ（model_groups のリストをマージ等）はしない — キー丸ごと置き換え。
+// Merge policy: top-level keys; the overlay (project) wins. We do not merge
+// elements within a key (e.g. lists in model_groups) — overlays replace wholesale.
 
 use std::path::{Path, PathBuf};
 
@@ -14,10 +14,10 @@ use anyhow::{Context, Result};
 
 use crate::config::types::Settings;
 
-/// ホーム config のパスを解決。
+/// Resolve the home config path.
 ///
-/// 優先順:
-/// 1. `--config <path>` で明示指定
+/// Priority:
+/// 1. Explicit `--config <path>` argument
 /// 2. `$AIC_CONFIG_DIR/config.yaml`
 /// 3. `$HOME/.config/aic/config.yaml`
 pub fn home_config_path(explicit: Option<&Path>) -> Result<PathBuf> {
@@ -27,22 +27,22 @@ pub fn home_config_path(explicit: Option<&Path>) -> Result<PathBuf> {
     if let Ok(dir) = std::env::var("AIC_CONFIG_DIR") {
         return Ok(PathBuf::from(dir).join("config.yaml"));
     }
-    let home = std::env::var("HOME").context("$HOME が解決できない")?;
+    let home = std::env::var("HOME").context("$HOME could not be resolved")?;
     Ok(PathBuf::from(home)
         .join(".config")
         .join("aic")
         .join("config.yaml"))
 }
 
-/// プロジェクト config のパス（カレントの `aic.yaml`、固定）。
+/// Project config path (always `aic.yaml` in the current directory).
 pub fn project_config_path() -> PathBuf {
     PathBuf::from("aic.yaml")
 }
 
-/// 2 層浅マージで Settings を構築。
+/// Build Settings via the two-layer shallow merge.
 ///
-/// ホーム/プロジェクトどちらも無くてもエラーにせず、デフォルト Settings を返す
-/// （DoD: ホーム config が無くてもデフォルト設定で起動する）。
+/// Returns default Settings even when neither file exists (DoD: startup works
+/// with no home config).
 pub fn load(explicit_home: Option<&Path>) -> Result<Settings> {
     let home_path = home_config_path(explicit_home)?;
     let project_path = project_config_path();
@@ -58,7 +58,7 @@ pub fn load(explicit_home: Option<&Path>) -> Result<Settings> {
     };
 
     let mut settings: Settings =
-        serde_yml::from_value(merged).context("config の解析に失敗")?;
+        serde_yml::from_value(merged).context("failed to parse config")?;
     settings.config_dir = home_path
         .parent()
         .map(Path::to_path_buf)
@@ -71,10 +71,10 @@ fn read_yaml(path: &Path) -> Result<Option<serde_yml::Value>> {
         return Ok(None);
     }
     let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("config 読み込み失敗: {}", path.display()))?;
+        .with_context(|| format!("failed to read config: {}", path.display()))?;
     let val: serde_yml::Value = serde_yml::from_str(&raw)
-        .with_context(|| format!("YAML パース失敗: {}", path.display()))?;
-    // 空ファイル → Null。マージで Mapping を要求するので Mapping 化しておく。
+        .with_context(|| format!("failed to parse YAML: {}", path.display()))?;
+    // Empty file → Null. Merge expects a Mapping, so coerce here.
     let val = if matches!(val, serde_yml::Value::Null) {
         serde_yml::Value::Mapping(serde_yml::Mapping::new())
     } else {
@@ -83,7 +83,7 @@ fn read_yaml(path: &Path) -> Result<Option<serde_yml::Value>> {
     Ok(Some(val))
 }
 
-/// トップレベル Mapping 同士を浅くマージ（overlay 側が優先、要素マージはしない）。
+/// Shallow-merge two top-level Mappings (overlay wins; no per-element merge).
 pub fn shallow_merge(base: serde_yml::Value, overlay: serde_yml::Value) -> serde_yml::Value {
     use serde_yml::Value;
     match (base, overlay) {
@@ -98,7 +98,7 @@ pub fn shallow_merge(base: serde_yml::Value, overlay: serde_yml::Value) -> serde
 }
 
 // ---------------------------------------------------------------------------
-// テスト
+// Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -127,7 +127,7 @@ mod tests {
         let merged_str = serde_yml::to_string(&merged).unwrap();
         assert!(merged_str.contains("default_model"));
         assert!(merged_str.contains("max_tool_iterations: 20"));
-        // ui は丸ごと置き換えなので history_size は消える
+        // `ui` is fully replaced, so history_size is gone.
         assert!(!merged_str.contains("history_size"));
     }
 }

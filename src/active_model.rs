@@ -1,14 +1,16 @@
-// active_model — `/model use` 時に解決される「使用中モデル」の完全な状態。
+// active_model — the fully-wired "model in use", resolved at `/model use` time.
 //
-// 役割の住み分け:
-//   - `config::Settings` は YAML から読んだ「設計図」
-//   - `ActiveModel` はランタイムに配線済みの「実体」
-//     - `endpoint_url`: `<base_url>/chat/completions` を結合済み
-//     - `api_key` / `headers`: `${VAR}` 展開済みの最終値（M5 で起動時に Settings 側で展開済）
-//   - agent / コマンド群は **ActiveModel だけ見れば LLM を呼べる**
+// Roles split:
+//   - `config::Settings` is the blueprint loaded from YAML
+//   - `ActiveModel` is the runtime, fully-wired instance:
+//     - `endpoint_url`: pre-built `<base_url>/chat/completions`
+//     - `api_key` / `headers`: final values after `${VAR}` expansion (which Settings
+//       does once at startup, see M5)
+//   - The agent and commands only need to see ActiveModel to make an LLM call
 //
-// この型は Settings の内部構造（model_groups の検索など）への依存を agent から切り離す
-// バウンダリ層。Settings 形が変わっても、`ActiveModel::resolve` を直すだけで済む。
+// This type is the boundary layer that shields the agent from Settings' internal
+// structure (model_groups lookup etc.). If Settings ever changes shape, only
+// `ActiveModel::resolve` needs updating.
 
 use std::collections::BTreeMap;
 
@@ -18,40 +20,41 @@ use crate::config::{ModelRef, Settings};
 
 #[derive(Debug, Clone)]
 pub struct ActiveModel {
-    /// config 上のグループ名（例: `"openai"`）。`/model` 一覧で `*` を付ける基準に使う。
+    /// The group name from config (e.g. `"openai"`). Used to mark the active model
+    /// with a `*` in the `/model` list.
     pub group: String,
-    /// ChatRequest の `model` フィールドに入る文字列（例: `"gpt-4o-mini"`）。
+    /// The string that goes into the ChatRequest `model` field (e.g. `"gpt-4o-mini"`).
     pub model: String,
-    /// `/chat/completions` を付加済みの完全 URL。
+    /// Full URL with `/chat/completions` already appended.
     pub endpoint_url: String,
     pub api_key: Option<String>,
     pub headers: BTreeMap<String, String>,
 }
 
 impl ActiveModel {
-    /// `/model` 一覧・ログ用の `<group>:<model>` 表示文字列。
+    /// Display string for `/model` listing and logs: `<group>:<model>`.
     pub fn label(&self) -> String {
         format!("{}:{}", self.group, self.model)
     }
 
-    /// `model_ref` を `ActiveModel` に解決する。`/model use` 時 / 起動時の default_model
-    /// 解決時に 1 度ずつ呼ぶ。
+    /// Resolve `model_ref` into an `ActiveModel`. Called once at `/model use` time
+    /// and once at startup for default_model.
     ///
-    /// 失敗パターン:
-    ///   - group が settings に無い
-    ///   - model が group の `models` リストに登録されていない
+    /// Failure cases:
+    ///   - The group is not in settings
+    ///   - The model is not in the group's `models` list
     pub fn resolve(settings: &Settings, model_ref: &ModelRef) -> Result<Self> {
         let group = settings
             .group_by_name(&model_ref.group)
             .with_context(|| {
                 format!(
-                    "model group '{}' が config に存在しません（`/model` で一覧）",
+                    "model group '{}' is not in the config (`/model` to list)",
                     model_ref.group
                 )
             })?;
         if !group.models.iter().any(|m| m == &model_ref.model) {
             anyhow::bail!(
-                "モデル '{}' は group '{}' に登録されていません（`/model` で一覧）",
+                "model '{}' is not registered under group '{}' (`/model` to list)",
                 model_ref.model,
                 model_ref.group
             );
@@ -122,7 +125,7 @@ mod tests {
         });
         let r = ModelRef::parse("openai:nonexistent").unwrap();
         let err = ActiveModel::resolve(&s, &r).unwrap_err();
-        assert!(err.to_string().contains("登録されていません"), "{err}");
+        assert!(err.to_string().contains("is not registered"), "{err}");
     }
 
     #[test]

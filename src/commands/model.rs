@@ -1,13 +1,14 @@
-// /model — モデル一覧と切り替え（SPEC §10, MILESTONES.md M4）。
+// /model — list models and switch the current one (SPEC §10, MILESTONES.md M4).
 //
-// サブコマンド:
-//   - 引数なし: 設定済みグループ／モデルを `<group>:<model>` 形式で列挙。
-//                現在の `current_model` には `*` を付与する。
-//   - `use <group>:<model>`: `current_model` を切り替える。
-//                config に該当グループ／モデルが無ければエラー（ループは継続）。
+// Subcommands:
+//   - no args: list all configured groups/models as `<group>:<model>`. The
+//              current `current_model` is marked with `*`.
+//   - `use <group>:<model>`: switch the current model. If the group/model is
+//              not in config, error out (the loop keeps running).
 //
-// `:` を含むモデル名（例 `local:qwen2.5-coder:32b`）を扱うため、引数のパースは
-// 必ず `ModelRef::parse`（内部で `splitn(2, ':')`）に委譲する。
+// Argument parsing must always go through `ModelRef::parse` (which uses
+// `splitn(2, ':')`) so model names containing `:` (e.g.
+// `local:qwen2.5-coder:32b`) are handled correctly.
 
 use anyhow::{bail, Result};
 use async_trait::async_trait;
@@ -26,7 +27,7 @@ impl Command for Model {
     }
 
     fn help(&self) -> &'static str {
-        "モデル一覧 / `use <group>:<model>` で切り替え"
+        "List models / switch via `use <group>:<model>`"
     }
 
     async fn run(&self, args: &str, ctx: &mut ReplContext) -> Result<Outcome> {
@@ -36,12 +37,13 @@ impl Command for Model {
             return Ok(Outcome::Continue);
         }
 
-        // `use <ref>` の形のみサポート。将来サブコマンドが増えたら match に展開する。
+        // Only `use <ref>` is supported today. Add more subcommands here via a
+        // match if we grow the surface.
         let (sub, rest) = split_first_token(trimmed);
         match sub {
             "use" => use_model(rest, ctx),
             other => {
-                bail!("不明なサブコマンド: {other}（使い方: /model | /model use <group>:<model>）")
+                bail!("unknown subcommand: {other} (usage: /model | /model use <group>:<model>)")
             }
         }
     }
@@ -50,12 +52,12 @@ impl Command for Model {
 fn print_list(ctx: &ReplContext) {
     let current_label = ctx.current_model.as_ref().map(|a| a.label());
     if ctx.settings.model_groups.is_empty() {
-        println!("（model_groups が未設定）");
+        println!("(no model_groups configured)");
         return;
     }
     for group in &ctx.settings.model_groups {
         if group.models.is_empty() {
-            println!("{}: （モデル未登録）", group.name);
+            println!("{}: (no models registered)", group.name);
             continue;
         }
         for model in &group.models {
@@ -68,12 +70,12 @@ fn print_list(ctx: &ReplContext) {
 
 fn use_model(arg: &str, ctx: &mut ReplContext) -> Result<Outcome> {
     if arg.is_empty() {
-        bail!("使い方: /model use <group>:<model>");
+        bail!("usage: /model use <group>:<model>");
     }
     let model_ref = ModelRef::parse(arg)?;
-    // resolve が group 存在・model リスト登録の両方を検証してエラーを返す。
+    // `resolve` validates both group presence and model registration.
     let active = ActiveModel::resolve(&ctx.settings, &model_ref)?;
-    println!("モデルを切り替えました: {}", active.label());
+    println!("Switched model: {}", active.label());
     ctx.current_model = Some(active);
     Ok(Outcome::Continue)
 }

@@ -1,12 +1,13 @@
-// cli — `aic env seal` / `aic env unseal` 本体。
+// cli — implementation of `aic env seal` / `aic env unseal`.
 //
-// `main.rs` から `config::secrets::seal` / `unseal` で呼ばれる（mod.rs の `pub use` で
-// パスを再公開しているため、呼び出し側は分割前と完全に同じ import で済む）。
+// Called from `main.rs` as `config::secrets::seal` / `unseal`. The path stays
+// the same as before the secrets module was split into a directory, thanks to
+// `pub use` in mod.rs.
 //
-// 役割: ファイル読み込み → 鍵取得 → 暗号/復号 → ファイル書き出し のフロー組み立て。
-// 暗号ロジックは `crypto`、鍵管理は `keychain` に委ねる — cfg gate は持たない。
-// 非 macOS では `keychain::load_or_create_key` / `load_key` が即 bail するため、
-// ユーザには分かりやすいエラーが伝わる。
+// Role: file read → key retrieval → encrypt/decrypt → file write. Encryption
+// goes through `crypto`, key handling through `keychain` — no cfg gate here.
+// On non-macOS, `keychain::load_or_create_key` / `load_key` bail immediately,
+// surfacing a clear error to the user.
 
 use std::path::Path;
 
@@ -14,23 +15,23 @@ use anyhow::{anyhow, Context, Result};
 
 use super::{crypto, keychain, ENV_JSON, ENV_JSON_ENC};
 
-/// `<config_dir>/env.json` → `<config_dir>/env.json.enc`。
-/// Keychain に鍵がなければ新規生成して保存（DoD: 既存鍵があれば再利用）。
+/// `<config_dir>/env.json` → `<config_dir>/env.json.enc`.
+/// If Keychain has no key, generate one and store it (DoD: reuse if already present).
 pub fn seal(config_dir: &Path) -> Result<()> {
     let plain_path = config_dir.join(ENV_JSON);
     let enc_path = config_dir.join(ENV_JSON_ENC);
 
     let raw = std::fs::read(&plain_path).with_context(|| {
         format!(
-            "env.json が見つからない: {}（先に平文を編集してください）",
+            "env.json not found at {} (edit the plaintext first)",
             plain_path.display()
         )
     })?;
-    // 妥当性: JSON object として読めることを確認。値型は問わない。
+    // Validate: must parse as a JSON object. Value types are not constrained.
     let _: serde_json::Map<String, serde_json::Value> =
         serde_json::from_slice(&raw).with_context(|| {
             format!(
-                "env.json は JSON オブジェクトである必要がある: {}",
+                "env.json must be a JSON object: {}",
                 plain_path.display()
             )
         })?;
@@ -41,23 +42,23 @@ pub fn seal(config_dir: &Path) -> Result<()> {
         std::fs::create_dir_all(parent).ok();
     }
     std::fs::write(&enc_path, &b64)
-        .with_context(|| format!("書き出し失敗: {}", enc_path.display()))?;
+        .with_context(|| format!("failed to write: {}", enc_path.display()))?;
     println!("sealed: {}", enc_path.display());
     Ok(())
 }
 
-/// `<config_dir>/env.json.enc` → `<config_dir>/env.json`。
-/// 編集用に平文を取り出す。Keychain 鍵が無ければエラー。
+/// `<config_dir>/env.json.enc` → `<config_dir>/env.json`.
+/// Extract the plaintext for editing. Errors if there's no Keychain key.
 pub fn unseal(config_dir: &Path) -> Result<()> {
     let enc_path = config_dir.join(ENV_JSON_ENC);
     let plain_path = config_dir.join(ENV_JSON);
 
     let b64 = std::fs::read_to_string(&enc_path)
-        .with_context(|| format!("読み込み失敗: {}", enc_path.display()))?;
+        .with_context(|| format!("failed to read: {}", enc_path.display()))?;
     let key = keychain::load_key()?.ok_or_else(|| {
         anyhow!(
-            "Keychain に鍵が無い (service={}, account={})。\
-             別マシンの env.json.enc は復号できません",
+            "no key in Keychain (service={}, account={}). \
+             env.json.enc from another machine can't be decrypted here",
             keychain::SERVICE,
             keychain::ACCOUNT
         )
@@ -67,7 +68,7 @@ pub fn unseal(config_dir: &Path) -> Result<()> {
         std::fs::create_dir_all(parent).ok();
     }
     std::fs::write(&plain_path, &plaintext)
-        .with_context(|| format!("書き出し失敗: {}", plain_path.display()))?;
+        .with_context(|| format!("failed to write: {}", plain_path.display()))?;
     println!("unsealed: {}", plain_path.display());
     Ok(())
 }

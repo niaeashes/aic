@@ -1,18 +1,19 @@
-// config/wizard — `/config setup` の対話的構築ドメイン（SPEC §10, M8）。
+// config/wizard — interactive Settings construction for `/config setup` (SPEC §10, M8).
 //
-// 役割分担:
-//   - ここ              : Settings を組み立てる「ドメインロジック」
-//   - commands/config.rs: コマンドとして起動し、書き出し先パス決定 / 確認 / ファイル書き出しを行う
-//   - repl/prompt.rs    : 1 行プロンプト等の対話 IO プリミティブ
+// Role split:
+//   - here              : the "domain logic" that assembles Settings
+//   - commands/config.rs: the command entry; decides the write target, confirmation, file write
+//   - repl/prompt.rs    : single-line prompt primitives shared with the wizard
 //
-// IO は `BufRead` を経由するため、テストでは `Cursor` を差し込める（標準入力に依存しない）。
+// IO flows through `BufRead` so tests can drive it with a `Cursor` instead of real stdin.
 //
-// 方針:
-//   - api_key / header は **`${VAR}` プレースホルダ推奨**。プロンプト文で誘導するだけで
-//     強制はしない（ollama 等の認証なしエンドポイント運用を妨げないため）。
-//   - default_model は収集済みグループ × モデルを 1 列に並べて番号選択させる。
-//     これにより `/config setup` の出力 Settings は必ず default_model が埋まる。
-//   - MCP サーバは任意。設定したくない場合は丸ごとスキップできる。
+// Style:
+//   - api_key / headers are **encouraged to be `${VAR}` placeholders**. We hint
+//     in the prompt copy rather than enforcing it — we don't want to block auth-less
+//     endpoints like ollama.
+//   - default_model: we flatten group × model into a list, then ask for a number,
+//     guaranteeing that the resulting Settings always has default_model populated.
+//   - MCP servers are optional and can be skipped entirely.
 
 use std::collections::BTreeMap;
 use std::io::BufRead;
@@ -23,30 +24,31 @@ use anyhow::{bail, Result};
 use crate::config::{McpServerCfg, ModelGroup, ModelRef, Settings, UiConfig};
 use crate::repl::prompt::{prompt_bool, prompt_optional, prompt_required, prompt_u32};
 
-/// 対話的に設定を収集して `Settings` を返す。`current` から `history_size` 等の
-/// 「ウィザードで聞かない値」を引き継ぐ。
+/// Drive the interactive flow and return the assembled `Settings`. `current` is
+/// the existing Settings; we carry forward values the wizard doesn't ask about
+/// (e.g. `history_size`).
 pub fn run<R: BufRead>(r: &mut R, current: &Settings) -> Result<Settings> {
-    // モデルグループは最低 1 個必須
+    // At least one model group is required.
     let mut groups: Vec<ModelGroup> = Vec::new();
     loop {
         println!("\n[model group #{}]", groups.len() + 1);
         let group = read_model_group(r)?;
         groups.push(group);
-        if !prompt_bool(r, "もう 1 つ model group を追加しますか？", false)? {
+        if !prompt_bool(r, "Add another model group?", false)? {
             break;
         }
     }
 
     let default_model = pick_default_model(r, &groups)?;
 
-    // MCP サーバは任意
+    // MCP servers are optional.
     let mut servers: Vec<McpServerCfg> = Vec::new();
-    if prompt_bool(r, "\nMCP サーバを設定しますか？", false)? {
+    if prompt_bool(r, "\nConfigure MCP servers?", false)? {
         loop {
             println!("\n[mcp server #{}]", servers.len() + 1);
             let srv = read_mcp_server(r)?;
             servers.push(srv);
-            if !prompt_bool(r, "もう 1 つ MCP サーバを追加しますか？", false)? {
+            if !prompt_bool(r, "Add another MCP server?", false)? {
                 break;
             }
         }
@@ -63,7 +65,7 @@ pub fn run<R: BufRead>(r: &mut R, current: &Settings) -> Result<Settings> {
     ))
 }
 
-/// 収集済みの値から `Settings` を組み立てる。IO なし。
+/// Pure builder — no IO.
 fn build_settings(
     groups: Vec<ModelGroup>,
     default_model: ModelRef,
@@ -84,13 +86,13 @@ fn build_settings(
 }
 
 fn read_model_group<R: BufRead>(r: &mut R) -> Result<ModelGroup> {
-    let name = prompt_required(r, "group 名（例: openai, local）")?;
-    let base_url = prompt_required(r, "base_url（例: https://api.openai.com/v1）")?;
+    let name = prompt_required(r, "group name (e.g. openai, local)")?;
+    let base_url = prompt_required(r, "base_url (e.g. https://api.openai.com/v1)")?;
     let api_key = prompt_optional(
         r,
-        "api_key（${VAR} 推奨。env.json で VAR=値、または環境変数で設定。空で None）",
+        "api_key (${VAR} recommended; set VAR in env.json or the environment. Empty = None)",
     )?;
-    println!("models（カンマ区切りで 1 つ以上）:");
+    println!("models (comma-separated, at least one):");
     let models_line = prompt_required(r, "models")?;
     let models: Vec<String> = models_line
         .split(',')
@@ -98,7 +100,7 @@ fn read_model_group<R: BufRead>(r: &mut R) -> Result<ModelGroup> {
         .filter(|s| !s.is_empty())
         .collect();
     if models.is_empty() {
-        bail!("models は 1 つ以上必要です");
+        bail!("at least one model is required");
     }
     Ok(ModelGroup {
         name,
@@ -110,12 +112,12 @@ fn read_model_group<R: BufRead>(r: &mut R) -> Result<ModelGroup> {
 }
 
 fn read_mcp_server<R: BufRead>(r: &mut R) -> Result<McpServerCfg> {
-    let name = prompt_required(r, "name（例: tools）")?;
-    let url = prompt_required(r, "url（例: https://example.com/mcp）")?;
+    let name = prompt_required(r, "name (e.g. tools)")?;
+    let url = prompt_required(r, "url (e.g. https://example.com/mcp)")?;
     let mut headers: BTreeMap<String, String> = BTreeMap::new();
     let auth = prompt_optional(
         r,
-        "Authorization ヘッダ（例: Bearer ${MCP_TOKEN}、空でスキップ）",
+        "Authorization header (e.g. Bearer ${MCP_TOKEN}; empty to skip)",
     )?;
     if let Some(v) = auth {
         headers.insert("Authorization".to_string(), v);
@@ -129,7 +131,7 @@ fn read_mcp_server<R: BufRead>(r: &mut R) -> Result<McpServerCfg> {
 }
 
 fn pick_default_model<R: BufRead>(r: &mut R, groups: &[ModelGroup]) -> Result<ModelRef> {
-    // フラット化して番号を振る
+    // Flatten and number.
     let mut flat: Vec<(String, String)> = Vec::new();
     for g in groups {
         for m in &g.models {
@@ -137,23 +139,23 @@ fn pick_default_model<R: BufRead>(r: &mut R, groups: &[ModelGroup]) -> Result<Mo
         }
     }
     if flat.is_empty() {
-        bail!("models が 1 つも無いので default_model を決定できません");
+        bail!("no models configured, so default_model can't be chosen");
     }
-    println!("\ndefault_model を選んでください:");
+    println!("\nChoose default_model:");
     for (i, (g, m)) in flat.iter().enumerate() {
         println!("  {}) {}:{}", i + 1, g, m);
     }
     loop {
-        let s = prompt_required(r, &format!("番号 (1-{})", flat.len()))?;
+        let s = prompt_required(r, &format!("number (1-{})", flat.len()))?;
         let n: usize = match s.parse() {
             Ok(n) => n,
             Err(_) => {
-                println!("error: 数字で答えてください");
+                println!("error: please answer with a number");
                 continue;
             }
         };
         if n == 0 || n > flat.len() {
-            println!("error: 範囲外です");
+            println!("error: out of range");
             continue;
         }
         let (g, m) = &flat[n - 1];
@@ -207,7 +209,7 @@ mod tests {
                 models: vec!["m3".into()],
             },
         ];
-        // 番号 3 → b:m3
+        // Number 3 → b:m3
         let mut cur = Cursor::new(b"3\n".as_slice());
         let r = pick_default_model(&mut cur, &groups).unwrap();
         assert_eq!(r.group, "b");
@@ -216,17 +218,16 @@ mod tests {
 
     #[test]
     fn run_setup_basic_no_mcp() {
-        // group 名 / base_url / api_key / models の 4 行 → デフォルト選択 (1) →
-        // group 追加なし (n) → MCP なし (n) → max_iter デフォルト
+        // 4 group lines → no more groups (n) → default 1 → no MCP (n) → max_iter default
         let input = concat!(
-            "openai\n",                    // group 名
+            "openai\n",                    // group name
             "https://api.openai.com/v1\n", // base_url
             "${OPENAI_API_KEY}\n",          // api_key
             "gpt-4o-mini\n",               // models
-            "n\n",                         // group 追加？ → No
-            "1\n",                         // default_model 番号
-            "n\n",                         // MCP サーバ設定？ → No
-            "\n",                          // max_tool_iterations デフォルト
+            "n\n",                         // add another group? → No
+            "1\n",                         // default_model number
+            "n\n",                         // configure MCP? → No
+            "\n",                          // max_tool_iterations default
         );
         let current = Settings::default();
         let mut cur = Cursor::new(input.as_bytes());

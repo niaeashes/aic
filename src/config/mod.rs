@@ -1,12 +1,12 @@
-// config — 設定管理モジュール（SPEC §4, §11）。
+// config — configuration management module (SPEC §4, §11).
 //
-// サブモジュール構成:
-//   types.rs   — 設定型の定義と impl（Settings / ModelGroup / ModelRef / UiConfig 等）
-//   loader.rs  — config.yaml のロードと 2 層マージ
-//   secrets.rs — secrets の復号と ${VAR} 展開（macOS Keychain + ChaCha20-Poly1305）
-//   wizard.rs  — `/config setup` の対話的構築ドメイン
+// Sub-modules:
+//   types.rs   — Configuration types and impls (Settings / ModelGroup / ModelRef / UiConfig etc.)
+//   loader.rs  — config.yaml loading and the two-layer merge
+//   secrets.rs — Secrets decryption and ${VAR} expansion (macOS Keychain + ChaCha20-Poly1305)
+//   wizard.rs  — Interactive collection domain for `/config setup`
 //
-// 「ランタイム解決済みのモデル」(`ActiveModel`) は config の外（`crate::active_model`）。
+// The "runtime-resolved model" (`ActiveModel`) lives outside config, at `crate::active_model`.
 
 pub mod loader;
 pub mod secrets;

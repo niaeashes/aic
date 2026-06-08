@@ -1,6 +1,6 @@
-// /exit — REPL を終了する（SPEC §10）。
+// /exit — terminate the REPL (SPEC §10).
 //
-// 実体は `Outcome::Exit` を返すだけ。REPL ループ側がそれを見て break する。
+// Just returns `Outcome::Exit`. The REPL loop sees that and breaks.
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -17,7 +17,7 @@ impl Command for Exit {
     }
 
     fn help(&self) -> &'static str {
-        "REPL を終了する"
+        "Exit the REPL"
     }
 
     async fn run(&self, _args: &str, _ctx: &mut ReplContext) -> Result<Outcome> {
