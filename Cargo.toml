@@ -2,10 +2,22 @@
 name = "aic"
 version = "0.1.0"
 edition = "2021"
+description = "Minimal interactive chat CLI for OpenAI-compatible endpoints with MCP (Streamable HTTP) tool calling."
+repository = "https://github.com/niaeashes/aic"
+license = "MIT"
+readme = "README.md"
+keywords = ["cli", "chat", "llm", "mcp", "openai"]
+categories = ["command-line-utilities"]
 
 [[bin]]
 name = "aic"
 path = "src/main.rs"
+
+# 配布バイナリは strip + LTO で削る。`cargo install --git` 経由ではここがそのまま効く。
+[profile.release]
+strip = true        # debug シンボルを落として ~30-50% 削減
+lto = true          # link-time optimization で速度 + サイズ両方寄与
+codegen-units = 1   # コンパイル時間↑ だが最適化↑（個人配布なら許容）
 
 [dependencies]
 # 非同期ランタイム

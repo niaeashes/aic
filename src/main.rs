@@ -27,7 +27,7 @@ mod repl;
 use active_model::ActiveModel;
 
 #[derive(Debug, Parser)]
-#[command(name = "aic", about = "minimal interactive chat CLI")]
+#[command(name = "aic", about = "minimal interactive chat CLI", version)]
 struct Cli {
     /// 明示的に使うホーム config ファイルパス（既定は `$AIC_CONFIG_DIR` か `~/.config/aic/config.yaml`）
     #[arg(long, global = true, value_name = "PATH")]

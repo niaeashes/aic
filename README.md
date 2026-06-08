@@ -187,6 +187,22 @@ src/
 
 ---
 
+## インストール
+
+```sh
+cargo install --git https://github.com/niaeashes/aic
+```
+
+利用者の `~/.cargo/bin/aic` に入る。Rust toolchain（rustc 1.70+）が必要。
+macOS Keychain を使うので、現状 macOS 以外は `aic env seal/unseal` が動かない
+（チャットと MCP は動く — 平文 `env.json` または環境変数で `${VAR}` を解決すれば良い）。
+
+アップデート:
+
+```sh
+cargo install --git https://github.com/niaeashes/aic --force
+```
+
 ## ライセンス
 
-未定。
+MIT License — 詳細は [LICENSE](LICENSE) を参照。
