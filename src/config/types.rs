@@ -151,7 +151,7 @@ impl Settings {
         self.model_groups.iter().find(|g| g.name == name)
     }
 
-    /// Expand `${VAR}` in every relevant Settings field (M5, SPEC §5).
+    /// Expand `${VAR}` in every relevant Settings field (SPEC §5).
     ///
     /// Called once at startup; downstream code assumes the values are already expanded.
     pub fn expand_secrets(&mut self, secrets: &Secrets) {

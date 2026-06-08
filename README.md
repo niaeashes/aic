@@ -8,8 +8,7 @@ streaming-only display.
 - **MCP is Streamable HTTP only** — no stdio or socket transports
 - **secrets via macOS Keychain + ChaCha20-Poly1305** — plaintext `env.json` must never be committed
 
-See [SPEC.md](SPEC.md) for the full specification and [MILESTONES.md](MILESTONES.md)
-for the milestone breakdown.
+See [SPEC.md](SPEC.md) for the full specification.
 
 ---
 

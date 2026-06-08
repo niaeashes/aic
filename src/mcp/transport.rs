@@ -11,8 +11,8 @@
 //
 // The SSE parser is intentionally minimal — "extract `data:` lines → parse each
 // message via serde_json into JSON-RPC" — because MCP responses are mostly
-// single-roundtrip and we can read the whole body first (unlike M2 LLM SSE, no
-// `eventsource-stream` needed here).
+// single-roundtrip and we can read the whole body first (unlike the LLM SSE
+// path, no `eventsource-stream` needed here).
 
 use std::collections::BTreeMap;
 

@@ -1,7 +1,7 @@
 // /clear — clear conversation history (SPEC §10).
 //
 // Only `session.messages` is cleared. The current model and any MCP connections
-// (from M6) are preserved.
+// are preserved.
 
 use anyhow::Result;
 use async_trait::async_trait;

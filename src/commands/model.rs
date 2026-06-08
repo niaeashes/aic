@@ -1,4 +1,4 @@
-// /model — list models and switch the current one (SPEC §10, MILESTONES.md M4).
+// /model — list models and switch the current one (SPEC §10).
 //
 // Subcommands:
 //   - no args: list all configured groups/models as `<group>:<model>`. The

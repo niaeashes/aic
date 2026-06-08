@@ -1,4 +1,4 @@
-// config/wizard — interactive Settings construction for `/config setup` (SPEC §10, M8).
+// config/wizard — interactive Settings construction for `/config setup` (SPEC §10).
 //
 // Role split:
 //   - here              : the "domain logic" that assembles Settings

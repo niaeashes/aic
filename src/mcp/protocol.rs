@@ -121,8 +121,7 @@ pub struct ToolsCallResult {
     #[serde(default)]
     pub content: Vec<ContentBlock>,
     /// When `true`, the tool itself reported an error. We don't turn this into
-    /// an Err: we let the agent loop continue so the model can read the message
-    /// (see M7).
+    /// an Err: we let the agent loop continue so the model can read the message.
     #[serde(default, rename = "isError")]
     pub is_error: bool,
 }
@@ -133,7 +132,7 @@ pub struct ToolsCallResult {
 pub enum ContentBlock {
     Text { text: String },
     /// image / resource / unknown types are collapsed into a unitless variant.
-    /// They produce no extracted text, which is fine for the M6-era text-only flow.
+    /// They produce no extracted text, which is fine for the text-only flow today.
     #[serde(other)]
     Other,
 }

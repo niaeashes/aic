@@ -3,9 +3,9 @@
 // Startup sequence:
 //   1. Initialize tracing (filterable via `RUST_LOG`; default is warn)
 //   2. Parse args with clap (`aic`, `aic env seal|unseal`, `aic --config <path>`)
-//   3. Load config as a two-layer shallow merge of home + project (M1)
-//   4. Load secrets from config_dir (M5: env.json.enc → env.json → env vars)
-//   5. Expand `${VAR}` in every Settings field (M5)
+//   3. Load config as a two-layer shallow merge of home + project
+//   4. Load secrets from config_dir (env.json.enc → env.json → env vars)
+//   5. Expand `${VAR}` in every Settings field
 //   6. Build the ReplContext and start the REPL loop
 //
 // `env seal|unseal` operates on the secrets files and exits without starting the REPL.
@@ -39,7 +39,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Cmd {
-    /// Manage the secrets files (env.json / env.json.enc) (SPEC §5, M5)
+    /// Manage the secrets files (env.json / env.json.enc) (SPEC §5)
     Env {
         #[command(subcommand)]
         action: EnvAction,

@@ -1,16 +1,15 @@
 // repl — rustyline-based interactive loop (SPEC §9.1).
 //
-// In M3 we refactored so any `/`-prefixed input goes straight through to
-// `dispatch::dispatch`. `/exit` itself is now a Command — we exit the loop when
-// it returns `Outcome::Exit`.
+// Any `/`-prefixed input goes straight through to `dispatch::dispatch`. `/exit`
+// itself is a Command — we exit the loop when it returns `Outcome::Exit`.
 //
 // `rustyline`'s readline is synchronous and blocking, but we call it on the
 // `#[tokio::main]` multi-threaded runtime, so blocking one worker leaves other
 // tasks free. As a single-user interactive CLI, that's a fine trade-off.
 //
-// M8: persist the history file at `config_dir/history.txt`. Loaded at startup,
-// saved at shutdown. `history_size` caps the entry count. Read/write failures
-// only emit a warning — they never block the loop.
+// History persists at `config_dir/history.txt`. Loaded at startup, saved at
+// shutdown. `history_size` caps the entry count. Read/write failures only emit
+// a warning — they never block the loop.
 
 use std::path::PathBuf;
 

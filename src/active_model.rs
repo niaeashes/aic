@@ -4,8 +4,8 @@
 //   - `config::Settings` is the blueprint loaded from YAML
 //   - `ActiveModel` is the runtime, fully-wired instance:
 //     - `endpoint_url`: pre-built `<base_url>/chat/completions`
-//     - `api_key` / `headers`: final values after `${VAR}` expansion (which Settings
-//       does once at startup, see M5)
+//     - `api_key` / `headers`: final values after `${VAR}` expansion (Settings
+//       performs this once at startup)
 //   - The agent and commands only need to see ActiveModel to make an LLM call
 //
 // This type is the boundary layer that shields the agent from Settings' internal

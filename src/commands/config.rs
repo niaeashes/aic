@@ -1,4 +1,4 @@
-// /config — view current configuration and launch the setup wizard (SPEC §10, MILESTONES.md M4, M8).
+// /config — view current configuration and launch the setup wizard (SPEC §10).
 //
 // Subcommands:
 //   - `show`  : print the current Settings as YAML, with api_key / headers masked.

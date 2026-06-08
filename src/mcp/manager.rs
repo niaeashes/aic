@@ -86,7 +86,7 @@ impl McpManager {
         }
         // Print the final public-name list (post-collision-resolution) once.
         // The per-server log shows real names; this log shows what the model
-        // actually sees in the catalog (SPEC §7.4, MILESTONES M6 DoD).
+        // actually sees in the catalog (SPEC §7.4).
         let names = mgr.public_tool_names();
         if !names.is_empty() {
             eprintln!("mcp: {} public tools: {}", names.len(), names.join(", "));
