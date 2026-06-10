@@ -85,6 +85,12 @@ mcp_servers:
       Authorization: Bearer ${MCP_TOKEN}
     enabled: true
 
+  # Or OAuth 2.1 + CIMD instead of a static token (see "MCP OAuth" below)
+  - name: oauth-tools
+    url: https://mcp.example.com/mcp
+    auth:
+      client_id: https://<you>.github.io/aic-client.json
+
 ui:
   history_size: 1000
   max_tool_iterations: 10
@@ -150,6 +156,55 @@ in a consistent state. **Ctrl-D** quits.
 
 ---
 
+## MCP OAuth (CIMD)
+
+For MCP servers that speak the MCP authorization spec, aic supports OAuth 2.1
+via **CIMD** (Client ID Metadata Documents) instead of static headers — no
+Dynamic Client Registration, no client secret (public client + PKCE).
+
+With CIMD, the OAuth `client_id` is the URL of a small JSON document **you
+host** describing the client. Put this on GitHub Pages (raw.githubusercontent.com
+serves `text/plain`, which some authorization servers reject — Pages serves
+proper `application/json`):
+
+```json
+{
+  "client_id": "https://<you>.github.io/aic-client.json",
+  "client_name": "aic",
+  "redirect_uris": ["http://127.0.0.1/callback"],
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "token_endpoint_auth_method": "none"
+}
+```
+
+`client_id` inside the document must equal the URL it is hosted at, and that
+same URL goes into `mcp_servers[].auth.client_id` in your config.
+
+Then, inside the REPL:
+
+```
+aic> /auth oauth-tools
+auth: open this URL to log in (if the browser didn't launch):
+  https://as.example/authorize?response_type=code&...
+auth: exchanging authorization code ...
+Connected to oauth-tools (3 tools): search, fetch, write
+```
+
+Notes:
+
+- **Tokens live in memory only.** Nothing is written to disk; after restarting
+  aic, run `/auth <name>` again. Within a session, expired tokens are refreshed
+  automatically (including one retry when the server answers 401).
+- Startup never opens a browser: OAuth servers are skipped with a
+  "run `/auth <name>`" notice until you log in.
+- `/auth` lists OAuth servers and their token state; `/auth logout <name>`
+  drops the tokens and the server's tools.
+- The authorization server must advertise `client_id_metadata_document_supported:
+  true` and PKCE `S256`; otherwise aic refuses (use static `headers` instead).
+
+---
+
 ## REPL commands
 
 | Command | Description |
@@ -161,6 +216,7 @@ in a consistent state. **Ctrl-D** quits.
 | `/model use <group>:<model>` | Switch model (e.g. `/model use local:qwen2.5-coder:32b`) |
 | `/config show` | Show current Settings as YAML (api_key / headers redacted) |
 | `/config setup` | Interactively generate the home `config.yaml` |
+| `/auth` | OAuth login for MCP servers: list state / `/auth <name>` / `/auth logout <name>` |
 | `/doctor` | Run environment checks (config / keyring / MCP) with setup hints |
 
 ---
@@ -225,10 +281,10 @@ src/
 ├── main.rs          Entry point: clap, tracing init
 ├── agent.rs         One-turn chat loop (assistant ↔ tool re-feed)
 ├── repl/            rustyline loop, dispatch
-├── commands/        /exit /clear /help /model /config (auto-collected via inventory)
+├── commands/        /exit /clear /help /model /config /auth (auto-collected via inventory)
 ├── config/          Settings types, YAML loading, ${VAR} expansion, secrets / keyring
 ├── llm/             ChatRequest, SSE parser, ChatClient
-└── mcp/             JSON-RPC, Streamable HTTP transport, tool catalog
+└── mcp/             JSON-RPC, Streamable HTTP transport, tool catalog, OAuth (CIMD)
 ```
 
 To add a new command, drop a file at `src/commands/<name>.rs` and add a single

@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "mcp-oauth-stub",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["dev/mcp-oauth-stub.py", "--port", "8000", "--expires-in", "30"],
+      "port": 8000
+    }
+  ]
+}

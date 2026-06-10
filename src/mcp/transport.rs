@@ -22,6 +22,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::mcp::protocol::{JsonRpcResponse, PROTOCOL_VERSION};
+use crate::mcp::HttpError;
 
 /// One MCP server's transport state.
 ///
@@ -33,6 +34,10 @@ pub struct Transport {
     http: reqwest::Client,
     /// Value of `Mcp-Session-Id` from the initialize response (echoed on later requests).
     session_id: Option<String>,
+    /// OAuth access token (SPEC §7.5). Applied as `Authorization: Bearer …`
+    /// AFTER the user-configured headers so a stale static `Authorization`
+    /// header can't clobber a freshly refreshed token.
+    bearer: Option<String>,
     /// Monotonically increasing JSON-RPC request id.
     next_id: i64,
 }
@@ -44,8 +49,14 @@ impl Transport {
             headers,
             http,
             session_id: None,
+            bearer: None,
             next_id: 0,
         }
+    }
+
+    /// Set (or clear) the OAuth Bearer token used on subsequent requests.
+    pub fn set_bearer(&mut self, token: Option<String>) {
+        self.bearer = token;
     }
 
     /// Debugging hook — peek at the session id (used by tests and a future
@@ -118,9 +129,14 @@ impl Transport {
             req = req.header("Mcp-Session-Id", sid);
         }
         // User-configured headers (`${VAR}` already expanded at startup). If a
-        // collision happens these win.
+        // collision happens these win — except against the OAuth bearer below.
         for (k, v) in &self.headers {
             req = req.header(k, v);
+        }
+        // OAuth bearer (SPEC §7.5) is applied last: a refreshed token must beat
+        // any stale static `Authorization` header left in the config.
+        if let Some(token) = &self.bearer {
+            req = req.header("Authorization", format!("Bearer {token}"));
         }
 
         let resp = req
@@ -142,10 +158,22 @@ impl Transport {
             .and_then(|h| h.to_str().ok())
             .unwrap_or("")
             .to_ascii_lowercase();
+        // Must be read before `resp.text()` consumes the response. Carries the
+        // RFC 9728 resource_metadata pointer on 401s (OAuth discovery).
+        let www_authenticate = resp
+            .headers()
+            .get("WWW-Authenticate")
+            .and_then(|h| h.to_str().ok())
+            .map(str::to_string);
 
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            bail!("MCP HTTP {}: {}", status.as_u16(), body);
+            return Err(HttpError {
+                status: status.as_u16(),
+                body,
+                www_authenticate,
+            }
+            .into());
         }
         let text = resp
             .text()

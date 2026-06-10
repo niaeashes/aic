@@ -75,8 +75,27 @@ pub struct McpServerCfg {
     pub url: String,
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
+    /// OAuth (CIMD) authorization. When set, `/auth <name>` runs the browser
+    /// flow and the connection uses a Bearer token instead of static headers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<OAuthCfg>,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+}
+
+/// OAuth 2.1 + CIMD (Client ID Metadata Document) settings for one MCP server.
+///
+/// `client_id` is the HTTPS URL of a user-hosted metadata document — the URL
+/// itself is the OAuth client_id; the authorization server fetches it. It is a
+/// public URL, not a secret, so `expand_secrets` / `redacted()` deliberately
+/// leave it alone. Validation (https scheme etc.) happens at `/auth` time so
+/// config loading stays forgiving.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OAuthCfg {
+    pub client_id: String,
+    /// Scopes to request. Empty/absent → fall back to what discovery advertises.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scopes: Option<Vec<String>>,
 }
 
 fn default_enabled() -> bool {
@@ -280,6 +299,7 @@ mod tests {
                 m.insert("Authorization".into(), "Bearer ${MCP}".into());
                 m
             },
+            auth: None,
             enabled: true,
         });
 
@@ -315,6 +335,7 @@ mod tests {
                 name: "tools".into(),
                 url: "http://example/mcp".into(),
                 headers: mcp_headers,
+                auth: None,
                 enabled: true,
             }],
             ..Default::default()
@@ -327,6 +348,51 @@ mod tests {
         // Non-secret fields are preserved.
         assert_eq!(r.model_groups[0].base_url, "https://api.openai.com/v1");
         assert_eq!(r.model_groups[0].models, vec!["gpt-4o-mini".to_string()]);
+    }
+
+    #[test]
+    fn mcp_server_deserializes_with_and_without_auth() {
+        let yaml = r#"
+mcp_servers:
+  - name: plain
+    url: http://a/mcp
+  - name: oauth
+    url: https://b/mcp
+    auth:
+      client_id: https://example.github.io/aic-client.json
+      scopes: [mcp.read, mcp.write]
+"#;
+        let s: Settings = serde_yml::from_str(yaml).unwrap();
+        assert!(s.mcp_servers[0].auth.is_none());
+        let auth = s.mcp_servers[1].auth.as_ref().unwrap();
+        assert_eq!(auth.client_id, "https://example.github.io/aic-client.json");
+        assert_eq!(
+            auth.scopes.as_deref(),
+            Some(&["mcp.read".to_string(), "mcp.write".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn redacted_keeps_oauth_client_id_visible() {
+        // The CIMD client_id is a public URL, not a secret.
+        let s = Settings {
+            mcp_servers: vec![McpServerCfg {
+                name: "tools".into(),
+                url: "https://example/mcp".into(),
+                headers: BTreeMap::new(),
+                auth: Some(OAuthCfg {
+                    client_id: "https://example.github.io/aic-client.json".into(),
+                    scopes: None,
+                }),
+                enabled: true,
+            }],
+            ..Default::default()
+        };
+        let r = s.redacted();
+        assert_eq!(
+            r.mcp_servers[0].auth.as_ref().unwrap().client_id,
+            "https://example.github.io/aic-client.json"
+        );
     }
 
     #[test]

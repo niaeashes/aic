@@ -127,6 +127,8 @@ fn read_mcp_server<R: BufRead>(r: &mut R) -> Result<McpServerCfg> {
         name,
         url,
         headers,
+        // OAuth (CIMD) config is hand-written in config.yaml, not wizard-driven.
+        auth: None,
         enabled: true,
     })
 }

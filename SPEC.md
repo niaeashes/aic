@@ -16,7 +16,8 @@ Streamable HTTP.
 
 - Connecting to OpenAI-compatible `/chat/completions` (SSE streaming only)
 
-- Connecting to MCP servers over Streamable HTTP (static-header auth only)
+- Connecting to MCP servers over Streamable HTTP (static-header auth, or
+  OAuth 2.1 with CIMD — §7.5)
 
 - Bridging LLM `tool_call` ↔ MCP `tools/call` (the agent loop)
 
@@ -32,7 +33,11 @@ Streamable HTTP.
 
 - MCP stdio transport (HTTP only)
 
-- MCP OAuth flow (static headers are enough for Tailscale-internal use)
+- OAuth Dynamic Client Registration (CIMD only — §7.5; an AS without CIMD
+  support is a hard error)
+
+- OAuth token persistence (tokens are in-memory only; every aic restart
+  requires `/auth <server>` again)
 
 - Non-streaming LLM paths (streaming-only)
 
@@ -87,11 +92,27 @@ src/
 
   mcp/
 
-    mod.rs             McpManager (connection management + tool catalog)
+    mod.rs             Module wiring + typed HttpError (401 detection)
+
+    manager.rs         McpManager (tool catalog + dispatch + connect_all)
+
+    server.rs          McpServer (one connection: transport + tools + OAuth state)
+
+    connect.rs         initialize → tools/list sequence (OAuth-aware)
 
     transport.rs       Streamable HTTP transport (POST + response handling)
 
     protocol.rs        JSON-RPC types, initialize / tools-list / tools-call
+
+    auth/
+
+      mod.rs           TokenSet / ServerAuth / interactive_login (§7.5)
+
+      discovery.rs     RFC 9728 / RFC 8414 metadata resolution
+
+      flow.rs          PKCE, authorize-URL build, token exchange
+
+      loopback.rs      RFC 8252 loopback redirect listener
 
   repl/
 
@@ -199,6 +220,16 @@ mcp_servers:
       Authorization: Bearer ${MCP_TOKEN}
 
     enabled: true
+
+  - name: oauth-tools                  # OAuth 2.1 + CIMD instead of static headers (§7.5)
+
+    url: https://mcp.example.com/mcp
+
+    auth:
+
+      client_id: https://<user>.github.io/aic-client.json   # hosted CIMD document URL
+
+      scopes: [mcp.read]               # optional; discovery defaults otherwise
 
 ui:
 
@@ -353,6 +384,62 @@ real_tool_name)>` — never parse the string back.
 `McpManager` owns this catalog. `as_openai_tools()` builds the `tools` array
 for LLM requests; `call(public_name, args)` routes to the right server.
 
+### 7.5 OAuth authorization (CIMD)
+
+Servers with an `auth:` block authenticate via OAuth 2.1 using **CIMD**
+(Client ID Metadata Documents, draft-ietf-oauth-client-id-metadata-document,
+as adopted by the MCP authorization spec): `auth.client_id` is the HTTPS URL
+of a **user-hosted JSON metadata document** (GitHub Pages works), and that URL
+*is* the OAuth `client_id` — the authorization server fetches it. There is no
+Dynamic Client Registration and no client secret (public client + PKCE S256).
+
+**Tokens are in-memory only.** Nothing is persisted; startup never opens a
+browser. An `auth:`-configured server is skipped at startup with a
+"run `/auth <name>`" notice, and `/auth <name>` is the single entry point into
+the interactive flow.
+
+Flow (`mcp/auth/`):
+
+1. **Discovery** — unauthenticated POST to the server harvests the 401
+   `WWW-Authenticate: Bearer resource_metadata="…"` pointer (RFC 9728); the
+   well-known locations (path-inserted first) are the fallback. The PRM's
+   `authorization_servers[0]` then resolves to AS metadata via RFC 8414
+   (`oauth-authorization-server{path}`, then OIDC discovery forms).
+
+2. **Hard requirements** — the AS must advertise `S256` in
+   `code_challenge_methods_supported` and
+   `client_id_metadata_document_supported: true`. Either missing → hard error
+   (there is no DCR fallback; the message says to use static `headers` instead).
+
+3. **Authorization** — PKCE S256 + random `state`; redirect URI is a loopback
+   listener `http://127.0.0.1:<ephemeral port>/callback` (RFC 8252 — literal
+   `127.0.0.1`, never `localhost`; the AS must ignore the port when matching).
+   The URL is always printed before the browser is launched (`open`/`xdg-open`,
+   best-effort). The callback wait is raced against Ctrl-C and a 300 s timeout
+   (commands are not raced by the REPL loop, so the race lives in
+   `interactive_login`). The accept loop 404s anything that isn't
+   `GET /callback` (favicon, speculative connections). A `state` mismatch or an
+   `error=` callback aborts without exchanging the code.
+
+4. **Tokens** — the RFC 8707 `resource` parameter (the canonicalized server
+   URL: lowercase scheme/host, default port dropped, fragment stripped) is sent
+   on the authorization, exchange, and refresh requests. Scope precedence:
+   config `scopes` → `WWW-Authenticate` `scope` hint → PRM `scopes_supported` →
+   omitted. `expires_at` is skew-adjusted by −60 s; a missing `expires_in`
+   disables proactive refresh.
+
+5. **At runtime** — the access token rides as `Authorization: Bearer …`,
+   applied *after* the config `headers` so a stale static `Authorization`
+   header can't clobber it (configuring both warns once). Before each
+   `tools/call` the token is refreshed if expired; a 401 mid-session triggers
+   one forced refresh + retry (typed `HttpError` in `mcp/mod.rs` makes the 401
+   detectable through anyhow). A rejected refresh (`invalid_grant`) tells the
+   user to run `/auth <name>` again.
+
+The hosted CIMD document must list `token_endpoint_auth_method: "none"`,
+`redirect_uris` containing `http://127.0.0.1/callback` (no port), and a
+`client_id` equal to its own URL. README carries a copy-paste example.
+
 ---
 
 ## 8. Agent loop (`agent.rs`)
@@ -492,6 +579,8 @@ an error and return `Continue`.
 
 | `/config setup` | Interactive wizard. Asks about model groups / MCP servers and writes the result to the home `config.yaml`. |
 
+| `/auth` | List OAuth-configured MCP servers and their in-memory token state. `/auth <name>` runs the §7.5 browser flow and (re)connects the server. `/auth logout <name>` drops the tokens and the server's tools. |
+
 | `/clear` | Clear the session message history (model selection and MCP connections are preserved). |
 
 | `/exit` | Return `Outcome::Exit` to end the REPL. |
@@ -598,7 +687,11 @@ A minimal `clap` surface:
 
 | `keyring` | macOS Keychain access |
 
-| `base64`, `rand` | Encoding and nonce/key bytes |
+| `base64`, `rand` | Encoding and nonce/key bytes (also PKCE verifier/state) |
+
+| `sha2` | PKCE S256 challenge hashing |
+
+| `url` | Authorize-URL construction, resource canonicalization (already in the tree via reqwest) |
 
 | `directories` (or hand-written) | Resolving home/config directories |
 
@@ -648,4 +741,5 @@ needed. Commands can use `inventory` from the start (it's a requirement).
 
 - Session persistence (save/restore JSON files) — Make `Session` serde-aware.
 
-- MCP OAuth — Replace `headers` with a dynamic token provider.
+- OAuth token persistence — Encrypt a token file with the existing
+  `config/secrets/crypto.rs` machinery (today tokens are in-memory only, §7.5).

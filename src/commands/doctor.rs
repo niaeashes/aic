@@ -176,16 +176,31 @@ fn check_mcp(ctx: &ReplContext) -> CheckResult {
     let public = ctx.mcp.public_tool_names().len();
     let connected = ctx.mcp.connected_server_count();
 
+    // OAuth-configured servers are never connected at startup (tokens are
+    // in-memory only) — point at /auth instead of implying a failure.
+    let auth_pending: Vec<&str> = ctx
+        .settings
+        .mcp_servers
+        .iter()
+        .filter(|s| s.enabled && s.auth.is_some())
+        .filter(|s| !matches!(ctx.mcp.server_status(&s.name), Some((n, _)) if n > 0))
+        .map(|s| s.name.as_str())
+        .collect();
+
     if configured == 0 {
         return CheckResult::ok("no MCP servers configured");
     }
     if connected == 0 {
-        return CheckResult::fail(format!(
+        let mut r = CheckResult::fail(format!(
             "{} server{} configured but none connected",
             configured,
             if configured == 1 { "" } else { "s" }
         ))
         .hint("Check server URL / auth headers, then restart aic to retry.");
+        for n in &auth_pending {
+            r.hints.push(format!("Run /auth {n} to authorize this OAuth server."));
+        }
+        return r;
     }
     let mut r = CheckResult::ok(format!(
         "{}/{} server{} connected — {} public tool{}",
@@ -197,9 +212,14 @@ fn check_mcp(ctx: &ReplContext) -> CheckResult {
     ));
     if connected < configured {
         r.level = CheckLevel::Warn;
-        r.hints.push(
-            "Some MCP servers failed at startup. See the startup log; restart aic to retry.".into()
-        );
+        if auth_pending.is_empty() {
+            r.hints.push(
+                "Some MCP servers failed at startup. See the startup log; restart aic to retry.".into()
+            );
+        }
+        for n in &auth_pending {
+            r.hints.push(format!("Run /auth {n} to authorize this OAuth server."));
+        }
     }
     r
 }

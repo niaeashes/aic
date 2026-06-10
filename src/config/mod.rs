@@ -15,4 +15,4 @@ pub mod types;
 pub mod wizard;
 
 pub use loader::{home_config_path, load};
-pub use types::{McpServerCfg, ModelGroup, ModelRef, Settings, UiConfig};
+pub use types::{McpServerCfg, ModelGroup, ModelRef, OAuthCfg, Settings, UiConfig};

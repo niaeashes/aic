@@ -53,6 +53,7 @@ pub fn split_first_token(s: &str) -> (&str, &str) {
 // Inventory holds static references. Each command file appends with `inventory::submit!`.
 inventory::collect!(&'static dyn Command);
 
+pub mod auth;
 pub mod clear;
 pub mod config;
 pub mod doctor;

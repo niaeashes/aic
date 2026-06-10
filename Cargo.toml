@@ -48,6 +48,11 @@ chacha20poly1305 = "0.10"
 base64 = "0.22"
 rand = "0.8"
 
+# MCP OAuth (CIMD) — PKCE S256 hashing and URL construction/canonicalization.
+# `url` is already in the dependency tree via reqwest, so it adds no weight.
+sha2 = "0.10"
+url = "2"
+
 # Path resolution
 directories = "5"
 
