@@ -132,6 +132,8 @@ src/
 
     clear.rs           /clear
 
+    session.rs         /session
+
     exit.rs            /exit
 
   agent.rs             One-turn chat ↔ tool loop
@@ -446,8 +448,8 @@ The hosted CIMD document must list `token_endpoint_auth_method: "none"`,
 
 `run_turn(ctx, user_input)`:
 
-1. If the session is empty (startup / after `/clear`) and `system_prompt` is set,
-   push it as the leading `system` message.
+1. If the session is empty (startup / after `/clear` / a fresh `/session new`)
+   and `system_prompt` is set, push it as the leading `system` message.
 
 2. Push the `user` message to the session.
 
@@ -474,6 +476,9 @@ The hosted CIMD document must list `token_endpoint_auth_method: "none"`,
 ### 9.1 REPL loop
 
 - Line editing and history come from `rustyline`. The history file lives in the config directory.
+
+- The prompt is `aic [<session id>]> ` and is recomputed every iteration, so a
+  `/session new` / `/session use` switch is immediately visible.
 
 - If input starts with `/` → dispatch as a command. Otherwise → `run_turn` for chat.
 
@@ -581,7 +586,9 @@ an error and return `Continue`.
 
 | `/auth` | List OAuth-configured MCP servers and their in-memory token state. `/auth <name>` runs the §7.5 browser flow and (re)connects the server. `/auth logout <name>` drops the tokens and the server's tools. |
 
-| `/clear` | Clear the session message history (model selection and MCP connections are preserved). |
+| `/clear` | Clear the active session's message history. The session id, model selection and MCP connections are preserved. |
+
+| `/session` | List in-memory sessions (active marked `*`, with message count and first-user-message snippet). `/session new` stashes the active session and starts a fresh one with a newly issued id (an **empty** active session is discarded, not stashed). `/session use <id>` switches; `<id>` may be a unique prefix (exact match wins over prefix). Ids are six lowercase base-36 chars, shown in the REPL prompt. Sessions are in-memory only — gone on exit (§15). |
 
 | `/exit` | Return `Outcome::Exit` to end the REPL. |
 
@@ -613,6 +620,8 @@ struct Settings {        // Loaded at startup, effectively immutable
 
 struct Session {         // Mutated via &mut
 
+    id: String,           // six base-36 chars, issued at creation; shown in the prompt
+
     messages: Vec<Message>,
 
 }
@@ -621,7 +630,9 @@ struct ReplContext {
 
     settings: Settings,
 
-    session:  Session,
+    session:  Session,    // the active session
+
+    stash:    Vec<Session>, // inactive sessions (/session use <id>); in-memory only
 
     http:     reqwest::Client,
 

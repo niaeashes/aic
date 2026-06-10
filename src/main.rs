@@ -130,6 +130,7 @@ async fn run_repl(config_path: Option<PathBuf>) -> Result<()> {
     let mut ctx = repl::context::ReplContext {
         settings,
         session: repl::context::Session::new(),
+        stash: Vec::new(),
         http,
         current_model,
         mcp,

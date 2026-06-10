@@ -36,7 +36,7 @@ For first-time setup, the interactive wizard is the easy path:
 
 ```sh
 aic
-aic> /config setup
+aic [a3f2c1]> /config setup
 ```
 
 You will be asked, in order:
@@ -136,15 +136,20 @@ On platforms without keyring support (Windows, BSD) only the last two apply.
 
 ```sh
 aic
-aic> Hello
+aic [a3f2c1]> Hello
 assistant> Hi! How can I help you today?
-aic> /exit
+aic [a3f2c1]> /exit
 ```
+
+The prompt shows the id of the current **session** (= one conversation history).
+`/session new` starts a fresh conversation while keeping the old one around;
+`/session use <id>` switches back (a unique id prefix is enough). Sessions are
+in-memory only — they are gone when aic exits.
 
 If you have MCP servers configured, tool calls are routed automatically:
 
 ```
-aic> What's the weather today?
+aic [a3f2c1]> What's the weather today?
 · tool call: tools__get_weather({"location":"Tokyo"})
 ✓ tool ok:   tools__get_weather
 assistant> The weather in Tokyo is...
@@ -184,7 +189,7 @@ same URL goes into `mcp_servers[].auth.client_id` in your config.
 Then, inside the REPL:
 
 ```
-aic> /auth oauth-tools
+aic [a3f2c1]> /auth oauth-tools
 auth: open this URL to log in (if the browser didn't launch):
   https://as.example/authorize?response_type=code&...
 auth: exchanging authorization code ...
@@ -211,7 +216,10 @@ Notes:
 |---|---|
 | `/help` | List all registered commands |
 | `/exit` | Quit (Ctrl-D also works) |
-| `/clear` | Reset conversation history (keeps model selection / MCP connections) |
+| `/clear` | Reset the current session's history (keeps the session id / model selection / MCP connections) |
+| `/session` | List in-memory sessions. Current marked with `*` |
+| `/session new` | Start a fresh session (new id); the old one stays switchable |
+| `/session use <id>` | Switch session (`<id>` may be a unique prefix) |
 | `/model` | List configured groups/models. Current model marked with `*` |
 | `/model use <group>:<model>` | Switch model (e.g. `/model use local:qwen2.5-coder:32b`) |
 | `/config show` | Show current Settings as YAML (api_key / headers redacted) |
@@ -281,7 +289,7 @@ src/
 ├── main.rs          Entry point: clap, tracing init
 ├── agent.rs         One-turn chat loop (assistant ↔ tool re-feed)
 ├── repl/            rustyline loop, dispatch
-├── commands/        /exit /clear /help /model /config /auth (auto-collected via inventory)
+├── commands/        /exit /clear /session /help /model /config /auth (auto-collected via inventory)
 ├── config/          Settings types, YAML loading, ${VAR} expansion, secrets / keyring
 ├── llm/             ChatRequest, SSE parser, ChatClient
 └── mcp/             JSON-RPC, Streamable HTTP transport, tool catalog, OAuth (CIMD)

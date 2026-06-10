@@ -28,7 +28,6 @@ pub mod dispatch;
 pub mod prompt;
 pub mod view;
 
-const PROMPT: &str = "aic> ";
 const HISTORY_FILE: &str = "history.txt";
 
 pub async fn run(ctx: &mut ReplContext) -> Result<()> {
@@ -104,6 +103,7 @@ mod tests {
         // tool result came back: drop both so the log ends on the user message.
         let mut s = Session {
             messages: vec![Message::user("hi"), assistant_with_tool_call()],
+            ..Session::new()
         };
         repair_session(&mut s);
         assert!(matches!(s.messages.as_slice(), [Message::User { .. }]));
@@ -117,6 +117,7 @@ mod tests {
                 assistant_with_tool_call(),
                 Message::tool("c1", "f", "partial"),
             ],
+            ..Session::new()
         };
         repair_session(&mut s);
         assert!(matches!(s.messages.as_slice(), [Message::User { .. }]));
@@ -126,6 +127,7 @@ mod tests {
     fn repair_leaves_clean_log_untouched() {
         let mut s = Session {
             messages: vec![Message::user("hi"), Message::assistant_text("done")],
+            ..Session::new()
         };
         repair_session(&mut s);
         assert_eq!(s.messages.len(), 2);
@@ -137,7 +139,10 @@ async fn run_loop(ctx: &mut ReplContext, rl: &mut DefaultEditor) -> Result<()> {
     // `assistant_start`, so reusing it across turns is fine.
     let mut view = TerminalView::new();
     loop {
-        match rl.readline(PROMPT) {
+        // Recomputed every iteration: `/session new` / `/session use` change the
+        // active session id mid-loop.
+        let prompt = format!("aic [{}]> ", ctx.session.id);
+        match rl.readline(&prompt) {
             Ok(line) => {
                 let trimmed = line.trim();
                 if trimmed.is_empty() {

@@ -15,16 +15,37 @@ use crate::mcp::McpManager;
 
 /// Conversation history. An OpenAI-compatible list of messages.
 ///
-/// `/clear` resets this (the model selection and MCP connections are preserved).
-#[derive(Debug, Default)]
+/// Each session carries a short `id`, issued at creation and shown in the REPL
+/// prompt (`aic [a3f2c1]>`). `/session` lists/creates/switches sessions;
+/// `/clear` empties `messages` but keeps the `id` (the model selection and MCP
+/// connections are preserved either way).
+#[derive(Debug)]
 pub struct Session {
+    /// Six lowercase base-36 chars. `/session new` re-rolls on (astronomically
+    /// unlikely) collision with an existing session.
+    pub id: String,
     pub messages: Vec<Message>,
 }
 
 impl Session {
     pub fn new() -> Self {
-        Self::default()
+        Self { id: new_session_id(), messages: Vec::new() }
     }
+}
+
+impl Default for Session {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// 36^6 ≈ 2×10⁹ ids — plenty for the handful of in-memory sessions a process
+/// ever holds.
+fn new_session_id() -> String {
+    use rand::Rng;
+    const ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut rng = rand::thread_rng();
+    (0..6).map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char).collect()
 }
 
 /// Shared state that the REPL, commands, and agent all touch.
@@ -33,6 +54,9 @@ impl Session {
 pub struct ReplContext {
     pub settings: Settings,
     pub session: Session,
+    /// Inactive sessions, switchable via `/session use <id>`. In-memory only —
+    /// gone on exit (persistence is future work, SPEC §15).
+    pub stash: Vec<Session>,
     pub http: reqwest::Client,
     /// The model currently in use. Resolved and cached at `/model use` time via
     /// `ActiveModel::resolve`. Stays `None` if config has no `default_model`;

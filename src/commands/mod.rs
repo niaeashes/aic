@@ -60,6 +60,7 @@ pub mod doctor;
 pub mod exit;
 pub mod help;
 pub mod model;
+pub mod session;
 
 #[cfg(test)]
 mod tests {
