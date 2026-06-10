@@ -15,6 +15,24 @@ use anyhow::{anyhow, Context, Result};
 
 use super::{crypto, keychain, ENV_JSON, ENV_JSON_ENC};
 
+/// Write a file containing secret material, restricting it to the owner (0o600)
+/// on Unix. Without this, `unseal` would drop plaintext secrets at the umask
+/// default — often group/world-readable — defeating the point of sealing.
+fn write_secret_file(path: &Path, contents: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::write(path, contents)
+        .with_context(|| format!("failed to write: {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("failed to chmod 600: {}", path.display()))?;
+    }
+    Ok(())
+}
+
 /// `<config_dir>/env.json` → `<config_dir>/env.json.enc`.
 /// If Keychain has no key, generate one and store it (DoD: reuse if already present).
 pub fn seal(config_dir: &Path) -> Result<()> {
@@ -38,11 +56,7 @@ pub fn seal(config_dir: &Path) -> Result<()> {
 
     let key = keychain::load_or_create_key()?;
     let b64 = crypto::encrypt(&raw, &key)?;
-    if let Some(parent) = enc_path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    std::fs::write(&enc_path, &b64)
-        .with_context(|| format!("failed to write: {}", enc_path.display()))?;
+    write_secret_file(&enc_path, b64.as_bytes())?;
     println!("sealed: {}", enc_path.display());
     Ok(())
 }
@@ -64,11 +78,7 @@ pub fn unseal(config_dir: &Path) -> Result<()> {
         )
     })?;
     let plaintext = crypto::decrypt(b64.trim(), &key)?;
-    if let Some(parent) = plain_path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    std::fs::write(&plain_path, &plaintext)
-        .with_context(|| format!("failed to write: {}", plain_path.display()))?;
+    write_secret_file(&plain_path, &plaintext)?;
     println!("unsealed: {}", plain_path.display());
     Ok(())
 }

@@ -117,6 +117,10 @@ pub struct ChatRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<Tool>>,
     pub stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
 }
 
 #[cfg(test)]
@@ -173,10 +177,15 @@ mod tests {
             messages: vec![Message::user("ping")],
             tools: None,
             stream: true,
+            temperature: None,
+            max_tokens: None,
         };
         let v = serde_json::to_value(&req).unwrap();
         assert_eq!(v["stream"], true);
         assert!(v.get("tools").is_none());
+        // Unset generation params are omitted entirely.
+        assert!(v.get("temperature").is_none());
+        assert!(v.get("max_tokens").is_none());
     }
 
     #[test]

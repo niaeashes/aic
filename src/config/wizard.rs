@@ -82,6 +82,7 @@ fn build_settings(
             max_tool_iterations: max_iter,
         },
         config_dir: PathBuf::new(),
+        ..Default::default()
     }
 }
 

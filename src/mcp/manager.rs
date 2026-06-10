@@ -63,9 +63,21 @@ impl McpManager {
     /// failures are absorbed.
     pub async fn connect_all(settings: &Settings, http: reqwest::Client) -> Self {
         let mut mgr = Self::empty();
+        // Track server names already wired. Two servers sharing a name would
+        // produce colliding `<name>__<tool>` catalog keys, silently shadowing the
+        // first server's tools (last-write-wins in the BTreeMap). Skip the dup
+        // loudly instead.
+        let mut seen_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for cfg in &settings.mcp_servers {
             if !cfg.enabled {
                 eprintln!("mcp: {} disabled, skipping", cfg.name);
+                continue;
+            }
+            if !seen_names.insert(cfg.name.as_str()) {
+                eprintln!(
+                    "warning: mcp server name {:?} is duplicated; skipping the later definition",
+                    cfg.name
+                );
                 continue;
             }
             let mut transport = Transport::new(cfg.url.clone(), cfg.headers.clone(), http.clone());

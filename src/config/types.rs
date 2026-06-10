@@ -27,16 +27,34 @@ use crate::config::secrets::Secrets;
 pub struct Settings {
     #[serde(default)]
     pub default_model: Option<ModelRef>,
+    /// Optional system prompt. Injected as the first message of every fresh
+    /// conversation (and again after `/clear`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
     #[serde(default)]
     pub model_groups: Vec<ModelGroup>,
     #[serde(default)]
     pub mcp_servers: Vec<McpServerCfg>,
     #[serde(default)]
     pub ui: UiConfig,
+    /// Generation parameters forwarded to `/chat/completions`. Omitted fields are
+    /// left out of the request so the server applies its own defaults.
+    #[serde(default)]
+    pub generation: GenerationConfig,
 
     // File-location-derived metadata. Not serialized; filled in after load.
     #[serde(skip)]
     pub config_dir: PathBuf,
+}
+
+/// Optional generation knobs. Every field is `Option` so an unset value is
+/// omitted from the request entirely (rather than sending a hard-coded default).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct GenerationConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

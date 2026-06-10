@@ -106,7 +106,18 @@ async fn run_repl(config_path: Option<PathBuf>) -> Result<()> {
         .as_ref()
         .and_then(|r| ActiveModel::resolve(&settings, r).ok());
 
-    let http = reqwest::Client::new();
+    // A connect timeout guards against endpoints that never answer the TCP/TLS
+    // handshake (otherwise the REPL hangs with no way out — readline isn't active
+    // during the request `await`). We deliberately do NOT set a total-request
+    // timeout: LLM responses stream for a long time and a whole-request deadline
+    // would truncate them mid-generation.
+    let http = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|e| {
+            eprintln!("warning: failed to build HTTP client ({e:#}); using defaults");
+            reqwest::Client::new()
+        });
 
     // Connect to MCP servers. For each enabled server we run initialize → tools/list.
     // Per-server connection failures are absorbed so startup never blocks (SPEC §14-6).

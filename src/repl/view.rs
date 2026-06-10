@@ -70,6 +70,15 @@ impl TurnObserver for TerminalView {
             "warning: tool calls reached ui.max_tool_iterations ({max}); aborting"
         );
     }
+
+    fn cancelled(&mut self) {
+        // End the in-progress assistant line cleanly, then note the interrupt.
+        if self.mid_line {
+            println!();
+            self.mid_line = false;
+        }
+        eprintln!("^C (interrupted)");
+    }
 }
 
 /// Single-line preview of tool arguments for the inline indicator.

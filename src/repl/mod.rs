@@ -17,8 +17,10 @@ use anyhow::Result;
 use rustyline::error::ReadlineError;
 use rustyline::{Config, DefaultEditor};
 
+use crate::agent::TurnObserver;
 use crate::commands::Outcome;
-use crate::repl::context::ReplContext;
+use crate::llm::types::Message;
+use crate::repl::context::{ReplContext, Session};
 use crate::repl::view::TerminalView;
 
 pub mod context;
@@ -65,6 +67,71 @@ pub async fn run(ctx: &mut ReplContext) -> Result<()> {
     result
 }
 
+/// Repair the message log after a mid-flight cancel so the next turn starts from
+/// a valid boundary. A turn interrupted between "assistant requested tool calls"
+/// and "all tool results pushed" would otherwise leave the conversation in a
+/// state most OpenAI-compatible servers reject (every `tool_calls` entry must be
+/// answered by a `tool` message). We drop any trailing `tool` messages and a
+/// trailing assistant-with-tool_calls, leaving the log ending at a clean point.
+fn repair_session(session: &mut Session) {
+    while matches!(session.messages.last(), Some(Message::Tool { .. })) {
+        session.messages.pop();
+    }
+    if matches!(session.messages.last(), Some(m) if !m.tool_calls().is_empty()) {
+        session.messages.pop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::types::{FunctionCall, ToolCall};
+
+    fn assistant_with_tool_call() -> Message {
+        Message::Assistant {
+            content: None,
+            tool_calls: vec![ToolCall {
+                id: "c1".into(),
+                kind: "function".into(),
+                function: FunctionCall { name: "f".into(), arguments: "{}".into() },
+            }],
+        }
+    }
+
+    #[test]
+    fn repair_drops_dangling_assistant_and_partial_tools() {
+        // assistant requested a tool call, but the turn was cancelled before the
+        // tool result came back: drop both so the log ends on the user message.
+        let mut s = Session {
+            messages: vec![Message::user("hi"), assistant_with_tool_call()],
+        };
+        repair_session(&mut s);
+        assert!(matches!(s.messages.as_slice(), [Message::User { .. }]));
+    }
+
+    #[test]
+    fn repair_drops_trailing_tool_then_assistant() {
+        let mut s = Session {
+            messages: vec![
+                Message::user("hi"),
+                assistant_with_tool_call(),
+                Message::tool("c1", "f", "partial"),
+            ],
+        };
+        repair_session(&mut s);
+        assert!(matches!(s.messages.as_slice(), [Message::User { .. }]));
+    }
+
+    #[test]
+    fn repair_leaves_clean_log_untouched() {
+        let mut s = Session {
+            messages: vec![Message::user("hi"), Message::assistant_text("done")],
+        };
+        repair_session(&mut s);
+        assert_eq!(s.messages.len(), 2);
+    }
+}
+
 async fn run_loop(ctx: &mut ReplContext, rl: &mut DefaultEditor) -> Result<()> {
     // One TerminalView for the whole session. Per-message state is reset by
     // `assistant_start`, so reusing it across turns is fine.
@@ -93,9 +160,25 @@ async fn run_loop(ctx: &mut ReplContext, rl: &mut DefaultEditor) -> Result<()> {
                     }
                 }
 
-                // Chat input → agent loop
-                if let Err(e) = crate::agent::run_turn(ctx, trimmed.to_string(), &mut view).await {
-                    eprintln!("error: {e:#}");
+                // Chat input → agent loop. Race it against Ctrl-C so a long
+                // generation or a stuck tool call can be interrupted (readline
+                // isn't active during this `await`, so SIGINT wouldn't otherwise
+                // reach us). `biased` polls the turn first so a turn that finishes
+                // in the same tick isn't reported as cancelled.
+                let cancelled = tokio::select! {
+                    biased;
+                    res = crate::agent::run_turn(ctx, trimmed.to_string(), &mut view) => {
+                        if let Err(e) = res {
+                            eprintln!("error: {e:#}");
+                        }
+                        false
+                    }
+                    _ = tokio::signal::ctrl_c() => true,
+                };
+                if cancelled {
+                    // The run_turn future is dropped here, releasing its borrows.
+                    view.cancelled();
+                    repair_session(&mut ctx.session);
                 }
             }
             // Ctrl-C cancels the current input and returns to the prompt.
