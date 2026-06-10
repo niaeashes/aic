@@ -137,11 +137,38 @@ merging of lists). Predictable and trivial to implement.
 
 `/config setup` writes to the home layer. The project layer must be created by hand.
 
+#### Project config trust (§4.3)
+
+The project layer is **trust-gated** (`config/trust.rs`). A checked-in `aic.yaml`
+can point `base_url`/`headers` at an arbitrary endpoint and have `${VAR}` expanded
+against the sealed secrets map — i.e. running `aic` inside a hostile repo could
+exfiltrate keyring secrets. To prevent this, a project config is applied only
+after the user approves it, keyed by **absolute path + content hash** (so editing
+the file forces re-approval), recorded in `<config_dir>/trusted_projects.json`.
+
+- Trusted (path+hash match): applied silently.
+- Untrusted, interactive stdin: prompt showing the overridden top-level keys
+  (flagging `model_groups`/`mcp_servers` as sensitive); on `y` record + apply,
+  otherwise ignore.
+- Untrusted, non-interactive stdin (CI/pipe): ignored with a warning (fail-safe).
+
+The hash is a non-cryptographic change detector (SipHash via `DefaultHasher`),
+not an integrity guarantee — the trust file lives in the user's own config dir,
+and the real safeguard is the human review at approval time.
+
 ### 4.2 config.yaml schema
 
 ```yaml
 
 default_model: openai:gpt-4o-mini   # model ref used at startup
+
+system_prompt: You are helpful.     # optional; first message of every fresh turn
+
+generation:                          # optional; omitted keys keep server defaults
+
+  temperature: 0.7
+
+  max_tokens: 2048
 
 model_groups:
 
@@ -175,13 +202,13 @@ mcp_servers:
 
 ui:
 
-  stream: true
-
   history_size: 1000
 
   max_tool_iterations: 10            # Upper bound on the agent loop
 
 ```
+
+Streaming is always on (`ChatRequest.stream: true`); it is not a config key.
 
 YAML deserialization uses `serde_yml` (since `serde_yaml` is archived; we use the
 maintained fork).
@@ -332,11 +359,14 @@ for LLM requests; `call(public_name, args)` routes to the right server.
 
 `run_turn(ctx, user_input)`:
 
-1. Push the `user` message to the session.
+1. If the session is empty (startup / after `/clear`) and `system_prompt` is set,
+   push it as the leading `system` message.
 
-2. Loop (up to `ui.max_tool_iterations` times):
+2. Push the `user` message to the session.
 
-   1. Build the request (messages + tools + current_model).
+3. Loop (up to `ui.max_tool_iterations` times):
+
+   1. Build the request (messages + tools + current_model + `generation.*`).
 
    2. Run the stream. Display assistant text incrementally; accumulate tool_calls.
 
@@ -346,7 +376,9 @@ for LLM requests; `call(public_name, args)` routes to the right server.
 
    5. Execute each tool_call via `McpManager.call` → push the result as a `tool` message.
 
-3. If the cap is reached, warn the user and abort (avoid aichat's unbounded recursion).
+   (numbered 1–5 as above)
+
+4. If the cap is reached, warn the user and abort (avoid aichat's unbounded recursion).
 
 ---
 
@@ -357,6 +389,15 @@ for LLM requests; `call(public_name, args)` routes to the right server.
 - Line editing and history come from `rustyline`. The history file lives in the config directory.
 
 - If input starts with `/` → dispatch as a command. Otherwise → `run_turn` for chat.
+
+- A chat turn is raced against `Ctrl-C` (`tokio::select!`); interrupting drops the
+  in-flight turn and returns to the prompt. Because a cancel can land between an
+  `assistant` tool-call request and its `tool` results, the message log is then
+  repaired (drop trailing `tool` messages and a dangling assistant-with-tool_calls)
+  so the next turn starts from a server-valid boundary. `Ctrl-D` exits.
+
+- The shared `reqwest::Client` sets a **connect timeout** but no whole-request
+  timeout — a total deadline would truncate long streamed responses.
 
 ### 9.2 Command trait (`commands/mod.rs`)
 

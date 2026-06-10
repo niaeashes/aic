@@ -46,9 +46,10 @@ pub fn project_config_path() -> PathBuf {
 pub fn load(explicit_home: Option<&Path>) -> Result<Settings> {
     let home_path = home_config_path(explicit_home)?;
     let project_path = project_config_path();
+    let config_dir = home_path.parent().map(Path::to_path_buf).unwrap_or_default();
 
     let home_val = read_yaml(&home_path)?;
-    let project_val = read_yaml(&project_path)?;
+    let project_val = load_trusted_project(&project_path, &config_dir)?;
 
     let merged = match (home_val, project_val) {
         (None, None) => serde_yml::Value::Mapping(serde_yml::Mapping::new()),
@@ -64,6 +65,52 @@ pub fn load(explicit_home: Option<&Path>) -> Result<Settings> {
         .map(Path::to_path_buf)
         .unwrap_or_default();
     Ok(settings)
+}
+
+/// Read the project `aic.yaml`, but only return it if the user has approved it.
+///
+/// A checked-in project config is a credential-exfiltration vector (it can point
+/// `base_url`/`headers` at an attacker and have `${SECRETS}` expanded into them),
+/// so we gate it behind a one-time approval keyed by path + content hash
+/// (`config::trust`). Untrusted or unreviewed configs are dropped — startup
+/// continues with the home config alone.
+fn load_trusted_project(
+    project_path: &Path,
+    config_dir: &Path,
+) -> Result<Option<serde_yml::Value>> {
+    if !project_path.exists() {
+        return Ok(None);
+    }
+    // We need the verbatim text for the trust hash, and the parsed value for the
+    // merge — read once, use for both.
+    let raw = std::fs::read_to_string(project_path)
+        .with_context(|| format!("failed to read config: {}", project_path.display()))?;
+    let val: serde_yml::Value = serde_yml::from_str(&raw)
+        .with_context(|| format!("failed to parse YAML: {}", project_path.display()))?;
+    let val = if matches!(val, serde_yml::Value::Null) {
+        serde_yml::Value::Mapping(serde_yml::Mapping::new())
+    } else {
+        val
+    };
+
+    let keys = top_level_keys(&val);
+    if crate::config::trust::ensure_project_trusted(project_path, config_dir, &raw, &keys) {
+        Ok(Some(val))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Top-level mapping keys, for the trust prompt summary. Non-mapping configs
+/// yield an empty list.
+fn top_level_keys(val: &serde_yml::Value) -> Vec<String> {
+    match val {
+        serde_yml::Value::Mapping(m) => m
+            .keys()
+            .filter_map(|k| k.as_str().map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 fn read_yaml(path: &Path) -> Result<Option<serde_yml::Value>> {

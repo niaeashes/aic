@@ -10,6 +10,7 @@
 
 pub mod loader;
 pub mod secrets;
+pub mod trust;
 pub mod types;
 pub mod wizard;
 

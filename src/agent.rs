@@ -54,6 +54,8 @@ pub trait TurnObserver {
     fn tool_failed(&mut self, public_name: &str, error_text: &str);
     /// We hit `max_tool_iterations` and aborted.
     fn iteration_limit_reached(&mut self, max: u32);
+    /// The turn was interrupted by the user (Ctrl-C) mid-flight.
+    fn cancelled(&mut self) {}
 }
 
 pub async fn run_turn(
@@ -61,6 +63,14 @@ pub async fn run_turn(
     user_input: String,
     view: &mut dyn TurnObserver,
 ) -> Result<()> {
+    // Inject the configured system prompt as the very first message of a fresh
+    // conversation. `session.messages` is empty at startup and right after
+    // `/clear`, so this re-seeds the prompt each time without duplicating it.
+    if ctx.session.messages.is_empty() {
+        if let Some(sp) = &ctx.settings.system_prompt {
+            ctx.session.messages.push(Message::system(sp.clone()));
+        }
+    }
     ctx.session.messages.push(Message::user(user_input));
 
     // ActiveModel is resolved once when the model is selected. The agent doesn't
@@ -68,6 +78,8 @@ pub async fn run_turn(
     // mutably (e.g. for mcp.call).
     let active = ctx.require_active_model()?;
     let max_iter = ctx.settings.ui.max_tool_iterations;
+    let temperature = ctx.settings.generation.temperature;
+    let max_tokens = ctx.settings.generation.max_tokens;
     let client = ChatClient::new(ctx.http.clone());
 
     for _iter in 0..max_iter {
@@ -85,6 +97,8 @@ pub async fn run_turn(
             messages: ctx.session.messages.clone(),
             tools,
             stream: true,
+            temperature,
+            max_tokens,
         };
 
         let assistant = stream_assistant(

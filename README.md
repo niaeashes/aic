@@ -6,7 +6,7 @@ streaming-only display.
 
 - **No provider abstraction** — talks directly to openai-compatible endpoints
 - **MCP is Streamable HTTP only** — no stdio or socket transports
-- **secrets via macOS Keychain + ChaCha20-Poly1305** — plaintext `env.json` must never be committed
+- **Sealed secrets via the system keyring (macOS Keychain / Linux Secret Service) + ChaCha20-Poly1305** — plaintext `env.json` must never be committed
 
 See [SPEC.md](SPEC.md) for the full specification.
 
@@ -14,7 +14,16 @@ See [SPEC.md](SPEC.md) for the full specification.
 
 ## From zero to first chat in 5 minutes
 
-### 1. Build
+### 1. Install
+
+```sh
+cargo install --git https://github.com/niaeashes/aic
+```
+
+Installs to `~/.cargo/bin/aic` (re-run with `--force` to update). If `~/.cargo/bin`
+is not on your `PATH` yet, add it: `export PATH="$HOME/.cargo/bin:$PATH"`.
+
+Or build from a checkout:
 
 ```sh
 cargo build --release
@@ -46,6 +55,15 @@ If you'd rather hand-edit instead of running the wizard:
 # ~/.config/aic/config.yaml
 default_model: openai:gpt-4o-mini
 
+# Optional: prepended as the system message of every fresh conversation
+# (re-applied after /clear).
+system_prompt: You are a concise, helpful assistant.
+
+# Optional: forwarded to /chat/completions. Omitted keys keep the server default.
+generation:
+  temperature: 0.7
+  max_tokens: 2048
+
 model_groups:
   - name: openai
     base_url: https://api.openai.com/v1
@@ -68,12 +86,12 @@ mcp_servers:
     enabled: true
 
 ui:
-  stream: true
   history_size: 1000
   max_tool_iterations: 10
 ```
 
-`${VAR}` placeholders are resolved in order: **secrets map → process environment variables**.
+`${VAR}` placeholders are resolved in order: **secrets map → process environment
+variables**. Use `$$` for a literal `$`; unresolved placeholders are left as-is.
 
 ### 3. Secrets
 
@@ -89,21 +107,24 @@ Create `~/.config/aic/env.json` and put the keys you reference via `${VAR}`:
 **Never commit the plaintext `env.json`.** It is already in `.gitignore`, but
 double-check before pushing.
 
-On macOS you can seal it into `env.json.enc` and then delete the plaintext:
+On macOS and Linux you can seal it into `env.json.enc` and then delete the plaintext:
 
 ```sh
 aic env seal
 # -> generates ~/.config/aic/env.json.enc
-# -> stores a 32-byte ChaCha20-Poly1305 key in macOS Keychain (service=aic, account=env-key)
+# -> stores a 32-byte ChaCha20-Poly1305 key in the system keyring
+#    (macOS Keychain / Linux Secret Service; service=aic, account=env-key)
 rm ~/.config/aic/env.json
 ```
 
-On subsequent startup, `env.json.enc` is decrypted with the Keychain key. If you
+On subsequent startup, `env.json.enc` is decrypted with the keyring key. If you
 carry the key to another machine you can commit the sealed `env.json.enc` alone.
 To edit, run `aic env unseal` to extract the plaintext back.
 
-On non-macOS platforms (Linux etc.) the fallback chain is: `env.json` plaintext →
-process environment variables. Keychain support is macOS-only.
+At startup, secrets are resolved in order: `env.json.enc` (decrypted with the
+keyring key) → plaintext `env.json` → process environment variables. Any failure
+prints a warning and falls through to the next source — startup never blocks.
+On platforms without keyring support (Windows, BSD) only the last two apply.
 
 ### 4. Start chatting
 
@@ -122,6 +143,10 @@ aic> What's the weather today?
 ✓ tool ok:   tools__get_weather
 assistant> The weather in Tokyo is...
 ```
+
+Press **Ctrl-C** during a response to interrupt the current turn (the generation
+or a stuck tool call) and return to the prompt; the conversation history is left
+in a consistent state. **Ctrl-D** quits.
 
 ---
 
@@ -145,8 +170,9 @@ assistant> The weather in Tokyo is...
 ```sh
 aic                       # Start the REPL
 aic --config <path>       # Explicit path to config.yaml
-aic env seal              # env.json -> env.json.enc (macOS)
-aic env unseal            # env.json.enc -> env.json (macOS)
+aic --version             # Print version
+aic env seal              # env.json -> env.json.enc (macOS / Linux)
+aic env unseal            # env.json.enc -> env.json (macOS / Linux)
 ```
 
 ### Environment variables
@@ -165,10 +191,30 @@ aic env unseal            # env.json.enc -> env.json (macOS)
 | `~/.config/aic/env.json` | Plaintext secrets. **Must not be committed** |
 | `~/.config/aic/env.json.enc` | Sealed secrets. Commit-safe |
 | `~/.config/aic/history.txt` | rustyline input history |
-| `./aic.yaml` | Project-level override (top-level shallow merge) |
+| `~/.config/aic/trusted_projects.json` | Approved project configs (path + content hash) |
+| `./aic.yaml` | Project-level override (top-level shallow merge, **trust-gated**) |
 
 The project-level `aic.yaml` overlays the home config with **complete top-level
 key replacement** (no element-wise merging within a key).
+
+### Project config trust
+
+Because a project `aic.yaml` can redirect `base_url`/`headers` and have
+`${VAR}` expanded against your sealed secrets, a checked-in config is a
+credential-exfiltration vector. So the first time aic sees a project config (and
+again whenever its contents change) it shows what the file overrides and asks for
+approval — the same model as `direnv`:
+
+```
+⚠ Untrusted project config detected: /path/to/aic.yaml
+  sets top-level keys: model_groups, ui
+  ⚠ model_groups can redirect requests and expand ${SECRETS} into arbitrary URLs/headers
+Trust this project config? [y/N]:
+```
+
+Approvals are recorded in `trusted_projects.json`. In a non-interactive context
+(piped stdin / CI) an unapproved project config is **ignored** with a warning —
+run aic interactively in that directory once to approve it.
 
 ---
 
@@ -180,7 +226,7 @@ src/
 ├── agent.rs         One-turn chat loop (assistant ↔ tool re-feed)
 ├── repl/            rustyline loop, dispatch
 ├── commands/        /exit /clear /help /model /config (auto-collected via inventory)
-├── config/          Settings types, YAML loading, ${VAR} expansion, secrets / Keychain
+├── config/          Settings types, YAML loading, ${VAR} expansion, secrets / keyring
 ├── llm/             ChatRequest, SSE parser, ChatClient
 └── mcp/             JSON-RPC, Streamable HTTP transport, tool catalog
 ```
@@ -216,25 +262,6 @@ variables. Run `aic` then `/doctor` to see exactly what's wired up.
 
 ### Other platforms (Windows, BSD)
 Chat and MCP work; sealed secrets do not. Use plaintext `env.json` or env vars.
-
-## Installation
-
-```sh
-cargo install --git https://github.com/niaeashes/aic
-```
-
-Installs to `~/.cargo/bin/aic`. If `~/.cargo/bin` is not on your `PATH` yet
-(i.e. you didn't install Rust via rustup), add it manually:
-
-```sh
-export PATH="$HOME/.cargo/bin:$PATH"
-```
-
-Updating:
-
-```sh
-cargo install --git https://github.com/niaeashes/aic --force
-```
 
 ## License
 
