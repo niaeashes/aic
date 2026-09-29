@@ -341,6 +341,13 @@ each `data:` line's JSON incrementally:
   instead of `<total> tokens`. It is display-only — nothing is trimmed or
   enforced. Servers that ignore `include_usage` simply produce no line.
 
+- After every response (usage or not), print
+  `· time: first token <s>, total <s>`, both measured from just before the
+  request is sent: *first token* is the first non-empty content or tool_call
+  fragment (so it includes prompt processing; `-` if none arrived), *total*
+  is the end of the stream. One pair per request, so a tool-calling turn
+  prints one per assistant message.
+
 - `data: [DONE]` ends the stream.
 
 ### 6.2 Message types

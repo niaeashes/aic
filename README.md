@@ -175,7 +175,11 @@ request used, as reported by the server:
 
 ```
 · context: 12,345 / 32,768 tokens (37%) (history 11,000 + reply 1,345)
+· time: first token 3.2s, total 12.4s
 ```
+
+`first token` is how long the server took before the first output — with a
+long history this is mostly prompt processing. `total` is the whole response.
 
 The OpenAI-compatible API does not report the context size, so the
 ` / 32,768 (37%)` part only appears when the model group sets `context_window`

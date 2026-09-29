@@ -23,6 +23,7 @@
 // (`accumulate`) has zero screen side effects and is easy to unit-test.
 
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use futures_util::{Stream, StreamExt};
@@ -65,9 +66,22 @@ pub trait TurnObserver {
     /// The server reported `finish_reason: "length"` — the response was cut off
     /// by a token / context limit.
     fn truncated(&mut self) {}
-    /// Token usage the server reported for the request that just finished.
-    /// `context_window` is the active model group's configured size, if any.
-    fn usage(&mut self, _usage: &Usage, _context_window: Option<u32>) {}
+    /// Stats for the request that just finished (one per assistant message).
+    fn response_stats(&mut self, _stats: &ResponseStats) {}
+}
+
+/// Per-request stats reported after each assistant message.
+#[derive(Debug, Clone, Default)]
+pub struct ResponseStats {
+    /// Token usage from the server, if it honored `include_usage`.
+    pub usage: Option<Usage>,
+    /// The active model group's configured `context_window`, if any.
+    pub context_window: Option<u32>,
+    /// Request sent → first content / tool_call fragment. `None` if the model
+    /// produced nothing.
+    pub first_token: Option<Duration>,
+    /// Request sent → stream end.
+    pub total: Duration,
 }
 
 pub async fn run_turn(
@@ -114,7 +128,7 @@ pub async fn run_turn(
             stream_options: StreamOptions::default(),
         };
 
-        let (assistant, usage) = stream_assistant(
+        let (assistant, mut stats) = stream_assistant(
             &client,
             &active.endpoint_url,
             active.api_key.as_deref(),
@@ -123,9 +137,8 @@ pub async fn run_turn(
             view,
         )
         .await?;
-        if let Some(u) = &usage {
-            view.usage(u, active.context_window);
-        }
+        stats.context_window = active.context_window;
+        view.response_stats(&stats);
         let tool_calls = assistant.tool_calls().to_vec();
 
         // Neither content nor tool_calls: the model produced nothing usable (e.g.
@@ -186,7 +199,8 @@ pub async fn run_turn(
 /// Open one stream and build the assistant message from it.
 ///
 /// Network setup is delegated to `ChatClient::stream`; the actual accumulation
-/// happens in `accumulate`.
+/// happens in `accumulate`. Timings are measured from just before the request
+/// is sent, so `first_token` includes the server's prompt processing.
 async fn stream_assistant(
     client: &ChatClient,
     endpoint: &str,
@@ -194,10 +208,26 @@ async fn stream_assistant(
     headers: &BTreeMap<String, String>,
     request: &ChatRequest,
     view: &mut dyn TurnObserver,
-) -> Result<(Message, Option<Usage>)> {
+) -> Result<(Message, ResponseStats)> {
     view.waiting();
+    let started = Instant::now();
     let stream = client.stream(endpoint, api_key, headers, request).await?;
-    accumulate(stream, view).await
+    let streamed = accumulate(stream, view).await?;
+    let stats = ResponseStats {
+        usage: streamed.usage,
+        context_window: None,
+        first_token: streamed.first_token_at.map(|t| t.duration_since(started)),
+        total: started.elapsed(),
+    };
+    Ok((streamed.message, stats))
+}
+
+/// What `accumulate` pulled out of one stream.
+struct Streamed {
+    message: Message,
+    usage: Option<Usage>,
+    /// When the first content / tool_call fragment arrived.
+    first_token_at: Option<Instant>,
 }
 
 /// Consume a stream of `StreamEvent`s, concatenate `content`, merge `tool_calls`
@@ -207,11 +237,12 @@ async fn stream_assistant(
 ///
 /// Body chunks are streamed to `view.assistant_delta` as they arrive. Start and
 /// end of the stream are signalled via `assistant_start` / `assistant_end`.
-/// The server-reported token usage (if any) is returned alongside the message.
+/// The server-reported token usage (if any) and the arrival time of the first
+/// fragment are returned alongside the message.
 async fn accumulate(
     stream: impl Stream<Item = Result<StreamEvent>>,
     view: &mut dyn TurnObserver,
-) -> Result<(Message, Option<Usage>)> {
+) -> Result<Streamed> {
     // The unfold-based stream isn't Unpin, so we Box::pin it.
     let mut stream = Box::pin(stream);
 
@@ -220,6 +251,7 @@ async fn accumulate(
     let mut tool_calls: BTreeMap<usize, ToolCallAccum> = BTreeMap::new();
     let mut finish_reason: Option<String> = None;
     let mut usage: Option<Usage> = None;
+    let mut first_token_at: Option<Instant> = None;
 
     view.assistant_start();
     while let Some(event) = stream.next().await {
@@ -230,6 +262,11 @@ async fn accumulate(
         }
         if payload.usage.is_some() {
             usage = payload.usage;
+        }
+        let has_output = payload.content.as_deref().is_some_and(|c| !c.is_empty())
+            || !payload.tool_calls.is_empty();
+        if has_output && first_token_at.is_none() {
+            first_token_at = Some(Instant::now());
         }
         if let Some(c) = payload.content.filter(|c| !c.is_empty()) {
             view.assistant_delta(&c);
@@ -275,7 +312,7 @@ async fn accumulate(
         content: if content.is_empty() { None } else { Some(content) },
         tool_calls: tool_calls_vec,
     };
-    Ok((message, usage))
+    Ok(Streamed { message, usage, first_token_at })
 }
 
 /// Parse the JSON string in `function.arguments` (returned by the LLM) into a `Value`.
@@ -404,8 +441,8 @@ mod tests {
             Ok(StreamEvent::Chunk(ChunkPayload { usage: Some(usage), ..Default::default() })),
         ];
         let mut view = CapturingView::default();
-        let (_, got) = accumulate(stream::iter(events), &mut view).await.unwrap();
-        assert_eq!(got, Some(usage));
+        let got = accumulate(stream::iter(events), &mut view).await.unwrap();
+        assert_eq!(got.usage, Some(usage));
         assert_eq!(view.events, vec!["delta:hi"]);
     }
 
@@ -413,12 +450,24 @@ mod tests {
     async fn accumulate_reports_length_truncation() {
         let events = vec![text_event("cut of"), finish_event("length")];
         let mut view = CapturingView::default();
-        let (msg, _) = accumulate(stream::iter(events), &mut view).await.unwrap();
+        let msg = accumulate(stream::iter(events), &mut view).await.unwrap().message;
         match &msg {
             Message::Assistant { content, .. } => assert_eq!(content.as_deref(), Some("cut of")),
             _ => panic!("expected assistant"),
         }
         assert_eq!(view.events, vec!["delta:cut of", "truncated"]);
+    }
+
+    #[tokio::test]
+    async fn accumulate_records_first_token_only_on_output() {
+        let mut view = CapturingView::default();
+        let got = accumulate(stream::iter(vec![text_event(""), finish_event("stop")]), &mut view)
+            .await
+            .unwrap();
+        assert!(got.first_token_at.is_none());
+
+        let got = accumulate(stream::iter(vec![text_event("a")]), &mut view).await.unwrap();
+        assert!(got.first_token_at.is_some());
     }
 
     #[tokio::test]
@@ -433,7 +482,7 @@ mod tests {
     async fn accumulate_text_only_concatenates_and_streams_deltas() {
         let events = vec![text_event("Hel"), text_event("lo")];
         let mut view = CapturingView::default();
-        let (msg, _) = accumulate(stream::iter(events), &mut view).await.unwrap();
+        let msg = accumulate(stream::iter(events), &mut view).await.unwrap().message;
         match msg {
             Message::Assistant { content, tool_calls } => {
                 assert_eq!(content.as_deref(), Some("Hello"));
@@ -454,7 +503,7 @@ mod tests {
             tool_event(0, None, None, Some(r#""hi"}"#)),
         ];
         let mut view = CapturingView::default();
-        let (msg, _) = accumulate(stream::iter(events), &mut view).await.unwrap();
+        let msg = accumulate(stream::iter(events), &mut view).await.unwrap().message;
         let calls = msg.tool_calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].id, "call_1");
@@ -470,7 +519,7 @@ mod tests {
         // assistant label or produce `Some("")` content.
         let events = vec![text_event(""), text_event("")];
         let mut view = CapturingView::default();
-        let (msg, _) = accumulate(stream::iter(events), &mut view).await.unwrap();
+        let msg = accumulate(stream::iter(events), &mut view).await.unwrap().message;
         match &msg {
             Message::Assistant { content, tool_calls } => {
                 assert!(content.is_none());
@@ -488,7 +537,7 @@ mod tests {
             tool_event(0, Some("id1"), Some("fetch"), Some("{}")),
         ];
         let mut view = CapturingView::default();
-        let (msg, _) = accumulate(stream::iter(events), &mut view).await.unwrap();
+        let msg = accumulate(stream::iter(events), &mut view).await.unwrap().message;
         match &msg {
             Message::Assistant { content, tool_calls } => {
                 assert_eq!(content.as_deref(), Some("thinking"));
@@ -508,7 +557,7 @@ mod tests {
             tool_event(1, Some("b"), Some("second"), Some("{}")),
         ];
         let mut view = CapturingView::default();
-        let (msg, _) = accumulate(stream::iter(events), &mut view).await.unwrap();
+        let msg = accumulate(stream::iter(events), &mut view).await.unwrap().message;
         let calls = msg.tool_calls();
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].function.name, "first");

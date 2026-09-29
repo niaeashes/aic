@@ -16,7 +16,9 @@
 
 use std::io::Write;
 
-use crate::agent::TurnObserver;
+use std::time::Duration;
+
+use crate::agent::{ResponseStats, TurnObserver};
 use crate::repl::spinner::Spinner;
 use crate::llm::stream::Usage;
 
@@ -114,9 +116,21 @@ impl TurnObserver for TerminalView {
         );
     }
 
-    fn usage(&mut self, usage: &Usage, context_window: Option<u32>) {
-        eprintln!("{}", usage_line(usage, context_window));
+    fn response_stats(&mut self, stats: &ResponseStats) {
+        if let Some(u) = &stats.usage {
+            eprintln!("{}", usage_line(u, stats.context_window));
+        }
+        eprintln!("{}", time_line(stats.first_token, stats.total));
     }
+}
+
+/// `· time: first token 3.2s, total 12.4s` (`first token -` if nothing came).
+fn time_line(first_token: Option<Duration>, total: Duration) -> String {
+    let first = match first_token {
+        Some(d) => format!("{:.1}s", d.as_secs_f32()),
+        None => "-".to_string(),
+    };
+    format!("· time: first token {first}, total {:.1}s", total.as_secs_f32())
 }
 
 /// `· context: 12,345 / 32,768 tokens (38%) (history 11,000 + reply 1,345)`.
@@ -207,6 +221,15 @@ mod tests {
             usage_line(&u, None),
             "· context: 12,345 tokens (history 11,000 + reply 1,345)"
         );
+    }
+
+    #[test]
+    fn time_line_formats_durations() {
+        assert_eq!(
+            time_line(Some(Duration::from_millis(3240)), Duration::from_millis(12400)),
+            "· time: first token 3.2s, total 12.4s"
+        );
+        assert_eq!(time_line(None, Duration::from_millis(500)), "· time: first token -, total 0.5s");
     }
 
     #[test]
