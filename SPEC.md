@@ -358,8 +358,9 @@ each `data:` line's JSON incrementally:
   `· time: first token <s>, total <s>`, both measured from just before the
   request is sent: *first token* is the first non-empty content or tool_call
   fragment (so it includes prompt processing; `-` if none arrived), *total*
-  is the end of the stream. One pair per request, so a tool-calling turn
-  prints one per assistant message.
+  is the end of the stream. Then `· at: <YYYY-MM-DD HH:MM:SS>`, the local
+  wall-clock time the response finished. One set per request, so a
+  tool-calling turn prints one per assistant message.
 
 - `data: [DONE]` ends the stream.
 

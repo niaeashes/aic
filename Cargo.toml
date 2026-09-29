@@ -63,6 +63,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Stream utilities (for reqwest's bytes_stream)
 futures-util = "0.3"
 
+# Local wall-clock time for the per-response timestamp line
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+
 # keyring 3.x picks a backend per platform feature.
 # Each target gets only the backend it needs; on unsupported platforms the
 # crate isn't compiled at all and keychain.rs falls back to a runtime bail.

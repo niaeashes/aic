@@ -160,7 +160,17 @@ impl TurnObserver for TerminalView {
             eprintln!("{}", usage_line(u, stats.context_window));
         }
         eprintln!("{}", time_line(stats.first_token, stats.total));
+        // The hook fires right as the stream ends, so "now" is the finish time.
+        eprintln!("{}", at_line(&chrono::Local::now()));
     }
+}
+
+/// `· at: 2026-09-29 14:03:12` — local wall-clock time the response finished.
+fn at_line<Tz: chrono::TimeZone>(t: &chrono::DateTime<Tz>) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    format!("· at: {}", t.format("%Y-%m-%d %H:%M:%S"))
 }
 
 /// `· time: first token 3.2s, total 12.4s` (`first token -` if nothing came).
@@ -269,6 +279,16 @@ mod tests {
             "· time: first token 3.2s, total 12.4s"
         );
         assert_eq!(time_line(None, Duration::from_millis(500)), "· time: first token -, total 0.5s");
+    }
+
+    #[test]
+    fn at_line_formats_local_time() {
+        use chrono::TimeZone;
+        let t = chrono::FixedOffset::east_opt(9 * 3600)
+            .unwrap()
+            .with_ymd_and_hms(2026, 9, 29, 14, 3, 12)
+            .unwrap();
+        assert_eq!(at_line(&t), "· at: 2026-09-29 14:03:12");
     }
 
     #[test]

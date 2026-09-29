@@ -179,6 +179,7 @@ request used, as reported by the server:
 ```
 · context: 12,345 / 32,768 tokens (37%) (history 11,000 + reply 1,345)
 · time: first token 3.2s, total 12.4s
+· at: 2026-09-29 14:03:12
 ```
 
 Thinking models (e.g. Ollama models with the `thinking` capability) stream
