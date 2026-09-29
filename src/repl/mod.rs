@@ -26,6 +26,7 @@ use crate::repl::view::TerminalView;
 pub mod context;
 pub mod dispatch;
 pub mod prompt;
+pub mod spinner;
 pub mod view;
 
 const HISTORY_FILE: &str = "history.txt";
@@ -170,20 +171,21 @@ async fn run_loop(ctx: &mut ReplContext, rl: &mut DefaultEditor) -> Result<()> {
                 // isn't active during this `await`, so SIGINT wouldn't otherwise
                 // reach us). `biased` polls the turn first so a turn that finishes
                 // in the same tick isn't reported as cancelled.
-                let cancelled = tokio::select! {
+                let outcome = tokio::select! {
                     biased;
-                    res = crate::agent::run_turn(ctx, trimmed.to_string(), &mut view) => {
-                        if let Err(e) = res {
-                            eprintln!("error: {e:#}");
-                        }
-                        false
-                    }
-                    _ = tokio::signal::ctrl_c() => true,
+                    res = crate::agent::run_turn(ctx, trimmed.to_string(), &mut view) => Some(res),
+                    _ = tokio::signal::ctrl_c() => None,
                 };
-                if cancelled {
-                    // The run_turn future is dropped here, releasing its borrows.
-                    view.cancelled();
-                    repair_session(&mut ctx.session);
+                // The run_turn future is dropped by now, releasing its borrows.
+                // Clear the spinner before printing anything (errors skip the hooks).
+                view.stop_spinner();
+                match outcome {
+                    Some(Ok(())) => {}
+                    Some(Err(e)) => eprintln!("error: {e:#}"),
+                    None => {
+                        view.cancelled();
+                        repair_session(&mut ctx.session);
+                    }
                 }
             }
             // Ctrl-C cancels the current input and returns to the prompt.

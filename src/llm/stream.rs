@@ -31,6 +31,24 @@ pub enum StreamEvent {
 pub struct ChunkPayload {
     pub content: Option<String>,
     pub tool_calls: Vec<ToolCallDelta>,
+    /// `choices[0].finish_reason`, usually only on the last chunk. `"length"`
+    /// means the server cut the response off (token / context limit).
+    pub finish_reason: Option<String>,
+    /// Token usage, sent in the final chunk when `stream_options.include_usage`
+    /// is honored (usually with empty `choices`).
+    pub usage: Option<Usage>,
+}
+
+/// `usage` object of a chunk. `prompt_tokens` is the whole history sent this
+/// request, so `total_tokens` is how much of the context window the turn used.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+pub struct Usage {
+    #[serde(default)]
+    pub prompt_tokens: u64,
+    #[serde(default)]
+    pub completion_tokens: u64,
+    #[serde(default)]
+    pub total_tokens: u64,
 }
 
 /// One `choices[0].delta.tool_calls[i]`. `index` selects the accumulator bucket.
@@ -71,7 +89,7 @@ pub fn parse_stream(resp: reqwest::Response) -> impl Stream<Item = Result<Stream
                         continue;
                     }
                     match parse_chunk(&event.data) {
-                        Ok(None) => continue, // Empty chunk (e.g. finish_reason only)
+                        Ok(None) => continue, // Empty chunk (e.g. usage only)
                         Ok(Some(payload)) => {
                             return Some((Ok(StreamEvent::Chunk(payload)), Some(es)));
                         }
@@ -93,13 +111,18 @@ pub fn parse_stream(resp: reqwest::Response) -> impl Stream<Item = Result<Stream
 struct RawChunk {
     #[serde(default)]
     choices: Vec<RawChoice>,
+    #[serde(default)]
+    usage: Option<Usage>,
 }
 
 #[derive(Debug, Deserialize, Default)]
 struct RawChoice {
     #[serde(default)]
     delta: RawDelta,
-    // finish_reason etc. is unused (done is signaled by stream end above).
+    // Done is signaled by stream end above; finish_reason is kept only so the
+    // agent can tell the user when a response was truncated.
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -131,8 +154,10 @@ struct RawFunction {
 fn parse_chunk(data: &str) -> Result<Option<ChunkPayload>> {
     let raw: RawChunk = serde_json::from_str(data)
         .map_err(|e| anyhow!("failed to parse chunk JSON: {e}; data={data}"))?;
+    let usage = raw.usage;
     let Some(choice) = raw.choices.into_iter().next() else {
-        return Ok(None);
+        // Usage-only final chunk (include_usage) has empty `choices`.
+        return Ok(usage.map(|u| ChunkPayload { usage: Some(u), ..Default::default() }));
     };
 
     let tool_calls: Vec<ToolCallDelta> = choice
@@ -153,13 +178,19 @@ fn parse_chunk(data: &str) -> Result<Option<ChunkPayload>> {
         })
         .collect();
 
-    if choice.delta.content.is_none() && tool_calls.is_empty() {
+    if choice.delta.content.is_none()
+        && tool_calls.is_empty()
+        && choice.finish_reason.is_none()
+        && usage.is_none()
+    {
         return Ok(None);
     }
 
     Ok(Some(ChunkPayload {
         content: choice.delta.content,
         tool_calls,
+        finish_reason: choice.finish_reason,
+        usage,
     }))
 }
 
@@ -181,9 +212,17 @@ mod tests {
 
     #[test]
     fn empty_delta_chunk_returns_none() {
-        // The "finish_reason only" final chunk etc. Not yielded.
-        let data = r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#;
+        let data = r#"{"choices":[{"delta":{}}]}"#;
         assert!(parse_chunk(data).unwrap().is_none());
+    }
+
+    #[test]
+    fn finish_reason_only_chunk_is_yielded() {
+        let data = r#"{"choices":[{"delta":{},"finish_reason":"length"}]}"#;
+        let p = parse_chunk(data).unwrap().unwrap();
+        assert!(p.content.is_none());
+        assert!(p.tool_calls.is_empty());
+        assert_eq!(p.finish_reason.as_deref(), Some("length"));
     }
 
     #[test]
@@ -191,6 +230,16 @@ mod tests {
         // Startup `usage` chunks etc. — empty `choices` mustn't panic.
         let data = r#"{"choices":[]}"#;
         assert!(parse_chunk(data).unwrap().is_none());
+    }
+
+    #[test]
+    fn usage_only_chunk_is_yielded() {
+        let data = r#"{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}}"#;
+        let p = parse_chunk(data).unwrap().unwrap();
+        assert_eq!(
+            p.usage,
+            Some(Usage { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120 })
+        );
     }
 
     #[test]

@@ -77,6 +77,9 @@ model_groups:
     # ollama needs no auth, so api_key is omitted
     models:
       - qwen2.5-coder:32b
+    # Optional, display-only: the server's context size (e.g. OLLAMA_CONTEXT_LENGTH),
+    # used to show context usage as a percentage after each response.
+    context_window: 32768
 
 mcp_servers:
   - name: tools
@@ -155,9 +158,38 @@ aic [a3f2c1]> What's the weather today?
 assistant> The weather in Tokyo is...
 ```
 
+While aic is waiting for the model's first token (or for a tool call), a
+spinner with the elapsed time is shown on stderr, e.g. `⠹ waiting 3.2s`. It
+disappears as soon as output starts, and is off when stderr is not a terminal.
+
 Press **Ctrl-C** during a response to interrupt the current turn (the generation
 or a stuck tool call) and return to the prompt; the conversation history is left
 in a consistent state. **Ctrl-D** quits.
+
+If the model returns a completely empty reply (no text, no tool calls), aic
+prints `warning: model returned an empty response` and does not add it to the
+history, so you can simply send your next message.
+
+After each response aic prints how much of the model's context window the
+request used, as reported by the server:
+
+```
+· context: 12,345 / 32,768 tokens (37%) (history 11,000 + reply 1,345)
+```
+
+The OpenAI-compatible API does not report the context size, so the
+` / 32,768 (37%)` part only appears when the model group sets `context_window`
+(keep it in sync with e.g. Ollama's `OLLAMA_CONTEXT_LENGTH`); without it you
+get just `12,345 tokens`. Servers that don't support
+`stream_options.include_usage` print nothing here.
+
+If a reply stops mid-sentence and aic prints `warning: response cut off by the
+server (finish_reason=length)`, the server hit a token limit: either
+`generation.max_tokens`, or the model's context window. With Ollama, the
+context window defaults to a few thousand tokens and long conversations fill it
+quickly. Raise it on the server side (e.g. `OLLAMA_CONTEXT_LENGTH=32768 ollama
+serve`, or `PARAMETER num_ctx` in a Modelfile). Ollama's OpenAI-compatible
+endpoint does not take a per-request context size.
 
 ---
 

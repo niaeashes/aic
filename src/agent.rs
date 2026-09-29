@@ -29,7 +29,8 @@ use futures_util::{Stream, StreamExt};
 use serde_json::Value;
 
 use crate::llm::stream::StreamEvent;
-use crate::llm::types::{ChatRequest, FunctionCall, Message, Tool, ToolCall};
+use crate::llm::stream::Usage;
+use crate::llm::types::{ChatRequest, FunctionCall, Message, StreamOptions, Tool, ToolCall};
 use crate::llm::ChatClient;
 use crate::repl::context::ReplContext;
 
@@ -40,6 +41,9 @@ use crate::repl::context::ReplContext;
 /// `assistant_end` have empty default impls so a test fake can just pick up
 /// the body and tool events.
 pub trait TurnObserver {
+    /// A request is about to be sent; nothing will be displayed until the first
+    /// token (or an error) arrives. Use to show a waiting indicator.
+    fn waiting(&mut self) {}
     /// Stream start for an assistant message (use to reset per-message state).
     fn assistant_start(&mut self) {}
     /// Delta chunk of the assistant body.
@@ -56,6 +60,14 @@ pub trait TurnObserver {
     fn iteration_limit_reached(&mut self, max: u32);
     /// The turn was interrupted by the user (Ctrl-C) mid-flight.
     fn cancelled(&mut self) {}
+    /// The model returned neither content nor tool_calls; nothing was recorded.
+    fn empty_response(&mut self) {}
+    /// The server reported `finish_reason: "length"` — the response was cut off
+    /// by a token / context limit.
+    fn truncated(&mut self) {}
+    /// Token usage the server reported for the request that just finished.
+    /// `context_window` is the active model group's configured size, if any.
+    fn usage(&mut self, _usage: &Usage, _context_window: Option<u32>) {}
 }
 
 pub async fn run_turn(
@@ -99,9 +111,10 @@ pub async fn run_turn(
             stream: true,
             temperature,
             max_tokens,
+            stream_options: StreamOptions::default(),
         };
 
-        let assistant = stream_assistant(
+        let (assistant, usage) = stream_assistant(
             &client,
             &active.endpoint_url,
             active.api_key.as_deref(),
@@ -110,7 +123,21 @@ pub async fn run_turn(
             view,
         )
         .await?;
+        if let Some(u) = &usage {
+            view.usage(u, active.context_window);
+        }
         let tool_calls = assistant.tool_calls().to_vec();
+
+        // Neither content nor tool_calls: the model produced nothing usable (e.g.
+        // it hit a stop sequence immediately, or only emitted reasoning fields we
+        // don't parse). Recording it would serialize as `{"role":"assistant"}`,
+        // which strict servers reject with 400 on every later request — poisoning
+        // the session. Drop it and tell the user instead.
+        if tool_calls.is_empty() && matches!(&assistant, Message::Assistant { content: None, .. }) {
+            view.empty_response();
+            return Ok(());
+        }
+
         ctx.session.messages.push(assistant);
 
         // tool_calls empty → ordinary response, we're done.
@@ -167,7 +194,8 @@ async fn stream_assistant(
     headers: &BTreeMap<String, String>,
     request: &ChatRequest,
     view: &mut dyn TurnObserver,
-) -> Result<Message> {
+) -> Result<(Message, Option<Usage>)> {
+    view.waiting();
     let stream = client.stream(endpoint, api_key, headers, request).await?;
     accumulate(stream, view).await
 }
@@ -179,22 +207,31 @@ async fn stream_assistant(
 ///
 /// Body chunks are streamed to `view.assistant_delta` as they arrive. Start and
 /// end of the stream are signalled via `assistant_start` / `assistant_end`.
+/// The server-reported token usage (if any) is returned alongside the message.
 async fn accumulate(
     stream: impl Stream<Item = Result<StreamEvent>>,
     view: &mut dyn TurnObserver,
-) -> Result<Message> {
+) -> Result<(Message, Option<Usage>)> {
     // The unfold-based stream isn't Unpin, so we Box::pin it.
     let mut stream = Box::pin(stream);
 
     let mut content = String::new();
     // index → in-progress (id, name, arguments)
     let mut tool_calls: BTreeMap<usize, ToolCallAccum> = BTreeMap::new();
+    let mut finish_reason: Option<String> = None;
+    let mut usage: Option<Usage> = None;
 
     view.assistant_start();
     while let Some(event) = stream.next().await {
         // [DONE] is converted to None at the stream layer, so it never reaches us here.
         let StreamEvent::Chunk(payload) = event?;
-        if let Some(c) = payload.content {
+        if payload.finish_reason.is_some() {
+            finish_reason = payload.finish_reason;
+        }
+        if payload.usage.is_some() {
+            usage = payload.usage;
+        }
+        if let Some(c) = payload.content.filter(|c| !c.is_empty()) {
             view.assistant_delta(&c);
             content.push_str(&c);
         }
@@ -215,6 +252,9 @@ async fn accumulate(
         }
     }
     view.assistant_end();
+    if finish_reason.as_deref() == Some("length") {
+        view.truncated();
+    }
 
     // Convert accumulators to ToolCall list (BTreeMap guarantees index order).
     // id/name being None at completion is a server bug, not a normal case;
@@ -231,10 +271,11 @@ async fn accumulate(
         })
         .collect();
 
-    Ok(Message::Assistant {
+    let message = Message::Assistant {
         content: if content.is_empty() { None } else { Some(content) },
         tool_calls: tool_calls_vec,
-    })
+    };
+    Ok((message, usage))
 }
 
 /// Parse the JSON string in `function.arguments` (returned by the LLM) into a `Value`.
@@ -313,12 +354,17 @@ mod tests {
         fn iteration_limit_reached(&mut self, max: u32) {
             self.events.push(format!("limit:{max}"));
         }
+        fn truncated(&mut self) {
+            self.events.push("truncated".to_string());
+        }
     }
 
     fn text_event(s: &str) -> Result<StreamEvent> {
         Ok(StreamEvent::Chunk(ChunkPayload {
             content: Some(s.to_string()),
             tool_calls: vec![],
+            finish_reason: None,
+            usage: None,
         }))
     }
 
@@ -336,14 +382,58 @@ mod tests {
                 name: name.map(str::to_string),
                 arguments_fragment: args.map(str::to_string),
             }],
+            finish_reason: None,
+            usage: None,
         }))
+    }
+
+    fn finish_event(reason: &str) -> Result<StreamEvent> {
+        Ok(StreamEvent::Chunk(ChunkPayload {
+            content: None,
+            tool_calls: vec![],
+            finish_reason: Some(reason.to_string()),
+            usage: None,
+        }))
+    }
+
+    #[tokio::test]
+    async fn accumulate_returns_usage() {
+        let usage = Usage { prompt_tokens: 90, completion_tokens: 10, total_tokens: 100 };
+        let events = vec![
+            text_event("hi"),
+            Ok(StreamEvent::Chunk(ChunkPayload { usage: Some(usage), ..Default::default() })),
+        ];
+        let mut view = CapturingView::default();
+        let (_, got) = accumulate(stream::iter(events), &mut view).await.unwrap();
+        assert_eq!(got, Some(usage));
+        assert_eq!(view.events, vec!["delta:hi"]);
+    }
+
+    #[tokio::test]
+    async fn accumulate_reports_length_truncation() {
+        let events = vec![text_event("cut of"), finish_event("length")];
+        let mut view = CapturingView::default();
+        let (msg, _) = accumulate(stream::iter(events), &mut view).await.unwrap();
+        match &msg {
+            Message::Assistant { content, .. } => assert_eq!(content.as_deref(), Some("cut of")),
+            _ => panic!("expected assistant"),
+        }
+        assert_eq!(view.events, vec!["delta:cut of", "truncated"]);
+    }
+
+    #[tokio::test]
+    async fn accumulate_normal_stop_is_not_truncation() {
+        let events = vec![text_event("done"), finish_event("stop")];
+        let mut view = CapturingView::default();
+        accumulate(stream::iter(events), &mut view).await.unwrap();
+        assert_eq!(view.events, vec!["delta:done"]);
     }
 
     #[tokio::test]
     async fn accumulate_text_only_concatenates_and_streams_deltas() {
         let events = vec![text_event("Hel"), text_event("lo")];
         let mut view = CapturingView::default();
-        let msg = accumulate(stream::iter(events), &mut view).await.unwrap();
+        let (msg, _) = accumulate(stream::iter(events), &mut view).await.unwrap();
         match msg {
             Message::Assistant { content, tool_calls } => {
                 assert_eq!(content.as_deref(), Some("Hello"));
@@ -364,7 +454,7 @@ mod tests {
             tool_event(0, None, None, Some(r#""hi"}"#)),
         ];
         let mut view = CapturingView::default();
-        let msg = accumulate(stream::iter(events), &mut view).await.unwrap();
+        let (msg, _) = accumulate(stream::iter(events), &mut view).await.unwrap();
         let calls = msg.tool_calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].id, "call_1");
@@ -375,13 +465,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accumulate_empty_chunks_yield_no_content_and_no_deltas() {
+        // Some servers stream `"content": ""` frames. They must not print the
+        // assistant label or produce `Some("")` content.
+        let events = vec![text_event(""), text_event("")];
+        let mut view = CapturingView::default();
+        let (msg, _) = accumulate(stream::iter(events), &mut view).await.unwrap();
+        match &msg {
+            Message::Assistant { content, tool_calls } => {
+                assert!(content.is_none());
+                assert!(tool_calls.is_empty());
+            }
+            _ => panic!("expected assistant"),
+        }
+        assert!(view.events.is_empty());
+    }
+
+    #[tokio::test]
     async fn accumulate_handles_mixed_content_and_tool_call() {
         let events = vec![
             text_event("thinking"),
             tool_event(0, Some("id1"), Some("fetch"), Some("{}")),
         ];
         let mut view = CapturingView::default();
-        let msg = accumulate(stream::iter(events), &mut view).await.unwrap();
+        let (msg, _) = accumulate(stream::iter(events), &mut view).await.unwrap();
         match &msg {
             Message::Assistant { content, tool_calls } => {
                 assert_eq!(content.as_deref(), Some("thinking"));
@@ -401,7 +508,7 @@ mod tests {
             tool_event(1, Some("b"), Some("second"), Some("{}")),
         ];
         let mut view = CapturingView::default();
-        let msg = accumulate(stream::iter(events), &mut view).await.unwrap();
+        let (msg, _) = accumulate(stream::iter(events), &mut view).await.unwrap();
         let calls = msg.tool_calls();
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].function.name, "first");

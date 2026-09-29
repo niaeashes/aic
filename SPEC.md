@@ -211,6 +211,8 @@ model_groups:
 
     models: [qwen2.5-coder:32b]      # api_key is optional
 
+    context_window: 32768            # optional, display-only (§6.1)
+
 mcp_servers:
 
   - name: tools
@@ -314,7 +316,8 @@ config presence, MCP connections, and what to do next when something is off.
 
 - Headers: `Authorization: Bearer {api_key}` (when api_key is set) + the group's `headers`.
 
-- Request body: `model`, `messages`, `tools` (from MCP; omitted if empty), `stream: true`.
+- Request body: `model`, `messages`, `tools` (from MCP; omitted if empty), `stream: true`,
+  `stream_options: {"include_usage": true}` (always sent).
 
 ### 6.1 SSE parsing (`llm/stream.rs`)
 
@@ -327,6 +330,16 @@ each `data:` line's JSON incrementally:
   `function.name` arrive in the first fragment only; `function.arguments`
   (a JSON string) is split across multiple fragments and must be concatenated.
   This is a common source of bugs — implement it explicitly.
+
+- `choices[0].finish_reason` → `"length"` means the response was truncated (§8).
+
+- `usage` (`prompt_tokens` / `completion_tokens` / `total_tokens`), usually in
+  a final chunk with empty `choices` → after the response, print one stderr
+  line `· context: <total> tokens (history <prompt> + reply <completion>)`.
+  If the active model group sets `context_window` (tokens; the OpenAI-compatible
+  API has no way to report it), show `<total> / <window> tokens (<pct>%)`
+  instead of `<total> tokens`. It is display-only — nothing is trimmed or
+  enforced. Servers that ignore `include_usage` simply produce no line.
 
 - `data: [DONE]` ends the stream.
 
@@ -460,6 +473,13 @@ The hosted CIMD document must list `token_endpoint_auth_method: "none"`,
    2. Run the stream. Display assistant text incrementally; accumulate tool_calls.
 
    3. Push the `assistant` message (with tool_calls) to the session.
+      If the response had **neither** content nor tool_calls, do not push it
+      (a content-less assistant message is rejected by strict servers with
+      400 on every later request); warn on stderr and end the turn.
+      Empty-string content chunks are ignored for display.
+      If the stream reports `finish_reason: "length"`, keep the (partial)
+      message but warn on stderr that the response was cut off by a token /
+      context limit.
 
    4. If tool_calls is empty → done, exit the loop.
 
@@ -476,6 +496,12 @@ The hosted CIMD document must list `token_endpoint_auth_method: "none"`,
 ### 9.1 REPL loop
 
 - Line editing and history come from `rustyline`. The history file lives in the config directory.
+
+- While a turn has nothing to print — waiting for the first token of a
+  response, or waiting on a tool call — a one-line stderr spinner with the
+  elapsed time is shown (`⠹ waiting 3.2s`, `⠹ running <server>__<tool> 1.1s`).
+  It is cleared before any other output and when the turn ends by any path
+  (success, error, Ctrl-C). It only animates when stderr is a terminal.
 
 - The prompt is `aic [<session id>]> ` and is recomputed every iteration, so a
   `/session new` / `/session use` switch is immediately visible.

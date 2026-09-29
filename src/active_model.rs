@@ -29,6 +29,8 @@ pub struct ActiveModel {
     pub endpoint_url: String,
     pub api_key: Option<String>,
     pub headers: BTreeMap<String, String>,
+    /// The group's `context_window`, for the usage display.
+    pub context_window: Option<u32>,
 }
 
 impl ActiveModel {
@@ -65,6 +67,7 @@ impl ActiveModel {
             endpoint_url: format!("{}/chat/completions", group.base_url.trim_end_matches('/')),
             api_key: group.api_key.clone(),
             headers: group.headers.clone(),
+            context_window: group.context_window,
         })
     }
 }
@@ -83,6 +86,7 @@ mod tests {
             api_key: Some("sk-xxx".into()),
             headers: BTreeMap::new(),
             models: vec!["gpt-4o-mini".into()],
+            context_window: None,
         });
         let r = ModelRef::parse("openai:gpt-4o-mini").unwrap();
         let a = ActiveModel::resolve(&s, &r).unwrap();
@@ -100,6 +104,7 @@ mod tests {
             api_key: None,
             headers: BTreeMap::new(),
             models: vec!["llama3".into()],
+            context_window: None,
         });
         let r = ModelRef::parse("g:llama3").unwrap();
         let a = ActiveModel::resolve(&s, &r).unwrap();
@@ -122,6 +127,7 @@ mod tests {
             api_key: None,
             headers: BTreeMap::new(),
             models: vec!["gpt-4o-mini".into()],
+            context_window: None,
         });
         let r = ModelRef::parse("openai:nonexistent").unwrap();
         let err = ActiveModel::resolve(&s, &r).unwrap_err();
@@ -137,6 +143,7 @@ mod tests {
             api_key: None,
             headers: BTreeMap::new(),
             models: vec!["gpt-4o-mini".into(), "gpt-4o".into()],
+            context_window: None,
         });
         let r = ModelRef::parse("openai:gpt-4o").unwrap();
         assert!(ActiveModel::resolve(&s, &r).is_ok());

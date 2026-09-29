@@ -67,6 +67,12 @@ pub struct ModelGroup {
     pub headers: BTreeMap<String, String>,
     #[serde(default)]
     pub models: Vec<String>,
+    /// Context window size (tokens) of the server behind this group, e.g. the
+    /// value of Ollama's `OLLAMA_CONTEXT_LENGTH`. Display-only: shows context
+    /// usage as `used / window (%)` after each response. The OpenAI-compatible
+    /// API does not report it, so the user states it here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -290,6 +296,7 @@ mod tests {
                 m
             },
             models: vec!["m".into()],
+            context_window: None,
         });
         s.mcp_servers.push(McpServerCfg {
             name: "srv".into(),
@@ -330,6 +337,7 @@ mod tests {
                 api_key: Some("sk-very-real".into()),
                 headers,
                 models: vec!["gpt-4o-mini".into()],
+                context_window: None,
             }],
             mcp_servers: vec![McpServerCfg {
                 name: "tools".into(),
@@ -404,6 +412,7 @@ mcp_servers:
                 api_key: None,
                 headers: BTreeMap::new(),
                 models: vec![],
+                context_window: None,
             }],
             ..Default::default()
         };

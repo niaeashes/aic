@@ -109,6 +109,7 @@ fn read_model_group<R: BufRead>(r: &mut R) -> Result<ModelGroup> {
         api_key,
         headers: BTreeMap::new(),
         models,
+        context_window: None,
     })
 }
 
@@ -203,6 +204,7 @@ mod tests {
                 api_key: None,
                 headers: BTreeMap::new(),
                 models: vec!["m1".into(), "m2".into()],
+                context_window: None,
             },
             ModelGroup {
                 name: "b".into(),
@@ -210,6 +212,7 @@ mod tests {
                 api_key: None,
                 headers: BTreeMap::new(),
                 models: vec!["m3".into()],
+                context_window: None,
             },
         ];
         // Number 3 → b:m3
@@ -250,6 +253,7 @@ mod tests {
             api_key: None,
             headers: BTreeMap::new(),
             models: vec!["m".into()],
+            context_window: None,
         }];
         let default_model = ModelRef { group: "g".into(), model: "m".into() };
         let s = build_settings(groups, default_model, vec![], 5, 500);

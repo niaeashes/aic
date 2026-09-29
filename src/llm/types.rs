@@ -121,6 +121,20 @@ pub struct ChatRequest {
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// Always `{"include_usage": true}` so the server reports token usage in a
+    /// final chunk (SPEC §6.1); shown to the user as context usage.
+    pub stream_options: StreamOptions,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StreamOptions {
+    pub include_usage: bool,
+}
+
+impl Default for StreamOptions {
+    fn default() -> Self {
+        Self { include_usage: true }
+    }
 }
 
 #[cfg(test)]
@@ -179,9 +193,11 @@ mod tests {
             stream: true,
             temperature: None,
             max_tokens: None,
+            stream_options: StreamOptions::default(),
         };
         let v = serde_json::to_value(&req).unwrap();
         assert_eq!(v["stream"], true);
+        assert_eq!(v["stream_options"]["include_usage"], true);
         assert!(v.get("tools").is_none());
         // Unset generation params are omitted entirely.
         assert!(v.get("temperature").is_none());
