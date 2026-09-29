@@ -63,6 +63,9 @@ system_prompt: You are a concise, helpful assistant.
 generation:
   temperature: 0.7
   max_tokens: 2048
+  # Thinking/reasoning level, sent as OpenAI `reasoning_effort` (none / low /
+  # medium / high). On Ollama, `none` turns thinking off for thinking models.
+  reasoning_effort: none
 
 model_groups:
   - name: openai
@@ -177,6 +180,17 @@ request used, as reported by the server:
 · context: 12,345 / 32,768 tokens (37%) (history 11,000 + reply 1,345)
 · time: first token 3.2s, total 12.4s
 ```
+
+Thinking models (e.g. Ollama models with the `thinking` capability) stream
+their reasoning first; aic shows it in gray on stderr before the answer:
+
+```
+thinking> The user wants a review of chapter 2, so first...
+assistant> 第２章の執筆、お疲れ様です。
+```
+
+Thinking is display-only — it is not kept in the conversation history. Turn it
+off with `generation.reasoning_effort: none`.
 
 `first token` is how long the server took before the first output — with a
 long history this is mostly prompt processing. `total` is the whole response.

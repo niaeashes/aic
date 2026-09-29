@@ -55,6 +55,10 @@ pub struct GenerationConfig {
     pub temperature: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// OpenAI `reasoning_effort`, passed through verbatim (e.g. `none`, `low`,
+    /// `medium`, `high`). On Ollama, `none` turns thinking off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

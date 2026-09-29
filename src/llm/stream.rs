@@ -30,6 +30,9 @@ pub enum StreamEvent {
 #[derive(Debug, Clone, Default)]
 pub struct ChunkPayload {
     pub content: Option<String>,
+    /// Thinking text: `delta.reasoning` (Ollama) or `delta.reasoning_content`
+    /// (vLLM, DeepSeek, ...). Display-only; never stored in the history.
+    pub reasoning: Option<String>,
     pub tool_calls: Vec<ToolCallDelta>,
     /// `choices[0].finish_reason`, usually only on the last chunk. `"length"`
     /// means the server cut the response off (token / context limit).
@@ -130,6 +133,10 @@ struct RawDelta {
     #[serde(default)]
     content: Option<String>,
     #[serde(default)]
+    reasoning: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
+    #[serde(default)]
     tool_calls: Vec<RawToolCall>,
 }
 
@@ -178,7 +185,9 @@ fn parse_chunk(data: &str) -> Result<Option<ChunkPayload>> {
         })
         .collect();
 
+    let reasoning = choice.delta.reasoning.or(choice.delta.reasoning_content);
     if choice.delta.content.is_none()
+        && reasoning.is_none()
         && tool_calls.is_empty()
         && choice.finish_reason.is_none()
         && usage.is_none()
@@ -188,6 +197,7 @@ fn parse_chunk(data: &str) -> Result<Option<ChunkPayload>> {
 
     Ok(Some(ChunkPayload {
         content: choice.delta.content,
+        reasoning,
         tool_calls,
         finish_reason: choice.finish_reason,
         usage,
@@ -230,6 +240,17 @@ mod tests {
         // Startup `usage` chunks etc. — empty `choices` mustn't panic.
         let data = r#"{"choices":[]}"#;
         assert!(parse_chunk(data).unwrap().is_none());
+    }
+
+    #[test]
+    fn parses_reasoning_under_either_name() {
+        let ollama = r#"{"choices":[{"delta":{"reasoning":"hmm"}}]}"#;
+        let vllm = r#"{"choices":[{"delta":{"reasoning_content":"hmm"}}]}"#;
+        for data in [ollama, vllm] {
+            let p = parse_chunk(data).unwrap().unwrap();
+            assert_eq!(p.reasoning.as_deref(), Some("hmm"));
+            assert!(p.content.is_none());
+        }
     }
 
     #[test]

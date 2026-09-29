@@ -49,6 +49,8 @@ pub trait TurnObserver {
     fn assistant_start(&mut self) {}
     /// Delta chunk of the assistant body.
     fn assistant_delta(&mut self, chunk: &str);
+    /// Delta chunk of the model's thinking (display-only, not kept in history).
+    fn reasoning_delta(&mut self, _chunk: &str) {}
     /// Stream end for an assistant message.
     fn assistant_end(&mut self) {}
     /// Tool call begins. `raw_arguments` is unformatted (preview formatting is left to the impl).
@@ -106,6 +108,7 @@ pub async fn run_turn(
     let max_iter = ctx.settings.ui.max_tool_iterations;
     let temperature = ctx.settings.generation.temperature;
     let max_tokens = ctx.settings.generation.max_tokens;
+    let reasoning_effort = ctx.settings.generation.reasoning_effort.clone();
     let client = ChatClient::new(ctx.http.clone());
 
     for _iter in 0..max_iter {
@@ -125,6 +128,7 @@ pub async fn run_turn(
             stream: true,
             temperature,
             max_tokens,
+            reasoning_effort: reasoning_effort.clone(),
             stream_options: StreamOptions::default(),
         };
 
@@ -264,9 +268,15 @@ async fn accumulate(
             usage = payload.usage;
         }
         let has_output = payload.content.as_deref().is_some_and(|c| !c.is_empty())
+            || payload.reasoning.as_deref().is_some_and(|r| !r.is_empty())
             || !payload.tool_calls.is_empty();
         if has_output && first_token_at.is_none() {
             first_token_at = Some(Instant::now());
+        }
+        // Thinking is shown but deliberately not accumulated: it is never sent
+        // back to the server as part of the history.
+        if let Some(r) = payload.reasoning.filter(|r| !r.is_empty()) {
+            view.reasoning_delta(&r);
         }
         if let Some(c) = payload.content.filter(|c| !c.is_empty()) {
             view.assistant_delta(&c);
@@ -394,14 +404,16 @@ mod tests {
         fn truncated(&mut self) {
             self.events.push("truncated".to_string());
         }
+        fn reasoning_delta(&mut self, chunk: &str) {
+            self.events.push(format!("think:{chunk}"));
+        }
     }
 
     fn text_event(s: &str) -> Result<StreamEvent> {
         Ok(StreamEvent::Chunk(ChunkPayload {
             content: Some(s.to_string()),
             tool_calls: vec![],
-            finish_reason: None,
-            usage: None,
+            ..Default::default()
         }))
     }
 
@@ -419,17 +431,14 @@ mod tests {
                 name: name.map(str::to_string),
                 arguments_fragment: args.map(str::to_string),
             }],
-            finish_reason: None,
-            usage: None,
+            ..Default::default()
         }))
     }
 
     fn finish_event(reason: &str) -> Result<StreamEvent> {
         Ok(StreamEvent::Chunk(ChunkPayload {
-            content: None,
-            tool_calls: vec![],
             finish_reason: Some(reason.to_string()),
-            usage: None,
+            ..Default::default()
         }))
     }
 
@@ -468,6 +477,25 @@ mod tests {
 
         let got = accumulate(stream::iter(vec![text_event("a")]), &mut view).await.unwrap();
         assert!(got.first_token_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn accumulate_shows_reasoning_but_does_not_store_it() {
+        let events = vec![
+            Ok(StreamEvent::Chunk(ChunkPayload {
+                reasoning: Some("let me think".into()),
+                ..Default::default()
+            })),
+            text_event("answer"),
+        ];
+        let mut view = CapturingView::default();
+        let got = accumulate(stream::iter(events), &mut view).await.unwrap();
+        assert_eq!(view.events, vec!["think:let me think", "delta:answer"]);
+        assert!(got.first_token_at.is_some());
+        match got.message {
+            Message::Assistant { content, .. } => assert_eq!(content.as_deref(), Some("answer")),
+            _ => panic!("expected assistant"),
+        }
     }
 
     #[tokio::test]

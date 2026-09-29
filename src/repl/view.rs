@@ -3,19 +3,20 @@
 // This is the only place we turn the agent's "events to display" vocabulary
 // into actual print!/eprintln!.
 //   - assistant body → stdout (flush per chunk)
+//   - thinking (reasoning) → stderr, gray, under a `thinking> ` label
 //   - tool indicators / cap warnings → stderr
 //
 // While nothing is being printed (waiting for the first token, running a tool)
 // a stderr spinner animates; every hook that prints stops it first, and the
 // REPL calls `stop_spinner` after each turn so errors never land on its line.
 //
-// `mid_line` is the per-message state we use to "print the assistant label once"
-// and "add a trailing newline only when we actually printed body content".
-// `assistant_start` resets it for every new message, so one `TerminalView`
-// instance can be reused for the whole session.
+// `section` is the per-message state we use to "print each label once" and
+// "add a trailing newline only when we actually printed something". Switching
+// between thinking and body closes the previous line first. `assistant_start`
+// resets it for every new message, so one `TerminalView` instance can be
+// reused for the whole session.
 
-use std::io::Write;
-
+use std::io::{IsTerminal, Write};
 use std::time::Duration;
 
 use crate::agent::{ResponseStats, TurnObserver};
@@ -23,19 +24,46 @@ use crate::repl::spinner::Spinner;
 use crate::llm::stream::Usage;
 
 const ASSISTANT_LABEL: &str = "assistant> ";
+const THINKING_LABEL: &str = "thinking> ";
+/// ANSI bright black (gray) and reset.
+const GRAY: &str = "\x1b[90m";
+const RESET: &str = "\x1b[0m";
 const TOOL_ARG_PREVIEW_MAX: usize = 80;
 
 /// Terminal (TTY) rendering. Behavior is bit-for-bit identical to before the View was split out.
 #[derive(Default)]
 pub struct TerminalView {
-    /// True if we've already printed the label and haven't terminated the line.
-    mid_line: bool,
+    /// Which labelled line is open (label printed, line not yet terminated).
+    section: Section,
     spinner: Spinner,
+    /// Gray thinking text only on a color-capable stderr (TTY, no `NO_COLOR`).
+    color: bool,
+}
+
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum Section {
+    #[default]
+    None,
+    Thinking,
+    Assistant,
 }
 
 impl TerminalView {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            color: std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none(),
+            ..Self::default()
+        }
+    }
+
+    /// Terminate the open line (if any) on the stream it was written to.
+    fn close_section(&mut self) {
+        match self.section {
+            Section::None => {}
+            Section::Thinking => eprintln!(),
+            Section::Assistant => println!(),
+        }
+        self.section = Section::None;
     }
 
     /// Clear any running spinner. Called by the REPL when a turn ends (by any
@@ -51,15 +79,32 @@ impl TurnObserver for TerminalView {
     }
 
     fn assistant_start(&mut self) {
-        self.mid_line = false;
+        self.section = Section::None;
+    }
+
+    fn reasoning_delta(&mut self, chunk: &str) {
+        self.spinner.stop();
+        if self.section != Section::Thinking {
+            self.close_section();
+            eprint!("{THINKING_LABEL}");
+            self.section = Section::Thinking;
+        }
+        // Color each chunk separately so an interrupt mid-thought can't leave
+        // the terminal gray.
+        if self.color {
+            eprint!("{GRAY}{chunk}{RESET}");
+        } else {
+            eprint!("{chunk}");
+        }
     }
 
     fn assistant_delta(&mut self, chunk: &str) {
         self.spinner.stop();
-        if !self.mid_line {
-            // Print the assistant label once, at the head of the message.
+        if self.section != Section::Assistant {
+            // Print the assistant label once, at the head of the body.
+            self.close_section();
             print!("{ASSISTANT_LABEL}");
-            self.mid_line = true;
+            self.section = Section::Assistant;
         }
         print!("{chunk}");
         // Flush so long responses don't pile up at the end.
@@ -68,10 +113,7 @@ impl TurnObserver for TerminalView {
 
     fn assistant_end(&mut self) {
         self.spinner.stop();
-        if self.mid_line {
-            println!();
-            self.mid_line = false;
-        }
+        self.close_section();
     }
 
     fn tool_call(&mut self, public_name: &str, raw_arguments: &str) {
@@ -97,11 +139,8 @@ impl TurnObserver for TerminalView {
 
     fn cancelled(&mut self) {
         self.spinner.stop();
-        // End the in-progress assistant line cleanly, then note the interrupt.
-        if self.mid_line {
-            println!();
-            self.mid_line = false;
-        }
+        // End the in-progress line cleanly, then note the interrupt.
+        self.close_section();
         eprintln!("^C (interrupted)");
     }
 

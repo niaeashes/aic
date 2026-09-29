@@ -193,6 +193,9 @@ generation:                          # optional; omitted keys keep server defaul
 
   max_tokens: 2048
 
+  reasoning_effort: none             # OpenAI reasoning_effort, sent verbatim;
+                                     # on Ollama `none` disables thinking
+
 model_groups:
 
   - name: openai
@@ -317,7 +320,9 @@ config presence, MCP connections, and what to do next when something is off.
 - Headers: `Authorization: Bearer {api_key}` (when api_key is set) + the group's `headers`.
 
 - Request body: `model`, `messages`, `tools` (from MCP; omitted if empty), `stream: true`,
-  `stream_options: {"include_usage": true}` (always sent).
+  `stream_options: {"include_usage": true}` (always sent), and the set
+  `generation.*` keys (`temperature`, `max_tokens`, `reasoning_effort`; unset
+  keys are omitted).
 
 ### 6.1 SSE parsing (`llm/stream.rs`)
 
@@ -330,6 +335,14 @@ each `data:` line's JSON incrementally:
   `function.name` arrive in the first fragment only; `function.arguments`
   (a JSON string) is split across multiple fragments and must be concatenated.
   This is a common source of bugs — implement it explicitly.
+
+- `choices[0].delta.reasoning` (Ollama) or `delta.reasoning_content` (vLLM,
+  DeepSeek, ...) → the model's thinking. Written incrementally to **stderr**
+  under a `thinking> ` label, in gray (ANSI 90) when stderr is a TTY and
+  `NO_COLOR` is unset. Display-only: never accumulated into the assistant
+  message, so it is not sent back in later requests. It counts as output for
+  the "first token" timing. Whether the model thinks at all is controlled by
+  `generation.reasoning_effort`.
 
 - `choices[0].finish_reason` → `"length"` means the response was truncated (§8).
 
